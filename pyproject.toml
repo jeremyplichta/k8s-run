@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "k8s-run"
+version = "0.1.0"
+description = "A minimal tool to easily run Kubernetes Jobs from local directories, GitHub repos, Dockerfiles, or container images"
+authors = [
+    {name = "k8s-run", email = "noreply@example.com"},
+]
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+dependencies = [
+    "kubernetes>=28.1.0",
+    "click>=8.0.0",
+    "pyyaml>=6.0",
+    "docker>=6.0.0",
+    "requests>=2.25.0",
+]
+
+[project.scripts]
+k8r = "k8r:main"
+
+[tool.hatch.build.targets.wheel]
+include = ["k8r.py"]
+
+[project.urls]
+Homepage = "https://github.com/jeremyplichta/k8s-run"
+Repository = "https://github.com/jeremyplichta/k8s-run"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0.0",
+    "black>=22.0.0",
+    "flake8>=4.0.0",
+    "mypy>=0.950",
+]
