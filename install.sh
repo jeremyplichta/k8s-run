@@ -51,14 +51,19 @@ fi
 echo "📦 Installing dependencies..."
 uv sync
 
-# Get shell type
-if [ -n "$ZSH_VERSION" ]; then
+# Get user's shell type
+USER_SHELL=$(basename "$SHELL")
+if [ "$USER_SHELL" = "zsh" ]; then
     SHELL_RC="$HOME/.zshrc"
-elif [ -n "$BASH_VERSION" ]; then
+elif [ "$USER_SHELL" = "bash" ]; then
     SHELL_RC="$HOME/.bashrc"
 else
-    # Default to bash
-    SHELL_RC="$HOME/.bashrc"
+    # Default to detecting common shell config files
+    if [ -f "$HOME/.zshrc" ]; then
+        SHELL_RC="$HOME/.zshrc"
+    else
+        SHELL_RC="$HOME/.bashrc"
+    fi
 fi
 
 # Add shell integration
@@ -72,9 +77,16 @@ else
     echo "ℹ️  Shell integration already exists in $SHELL_RC"
 fi
 
-# Test installation
-echo "🧪 Testing installation..."
+# Source shell configuration and test installation
+echo "🔄 Activating k8r in current shell..."
 source "$SHELL_RC" 2>/dev/null || true
+
+echo "🧪 Testing installation..."
+if command -v k8r &> /dev/null; then
+    echo "✅ k8r is now available!"
+else
+    echo "⚠️  k8r function loaded but may need new shell session"
+fi
 
 echo ""
 echo "🎉 k8s-run (k8r) installation complete!"
@@ -82,8 +94,7 @@ echo ""
 echo "📍 Installed to: $INSTALL_DIR/$REPO_NAME"
 echo "🔧 Shell integration: $SHELL_RC"
 echo ""
-echo "🚀 To get started:"
-echo "   source $SHELL_RC"
+echo "🚀 k8r is ready to use:"
 echo "   k8r --help"
 echo ""
 echo "💡 Example usage:"
