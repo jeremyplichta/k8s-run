@@ -1,4 +1,4 @@
-# K8s Run Tool Description
+# K8s Run 
 
 # Overview
 Implement a minimal self contained project called k8s-run or `k8r` for short. This tool is meant to make it easy to spin K8s Jobs to run a local project or directory. It can with multiple sources including:
