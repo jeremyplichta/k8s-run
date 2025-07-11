@@ -200,6 +200,65 @@ class K8sRun:
         else:
             raise ValueError(f"Unsupported source type: {source_type}")
         
+        # Discover and mount secrets for this job
+        job_secrets = self.get_job_secrets(final_job_name)
+        secret_volumes = []
+        secret_volume_mounts = []
+        secret_env_vars = []
+        
+        for secret_info in job_secrets:
+            secret_name = secret_info["secret_name"]
+            secret_k8s_name = secret_info["name"]
+            
+            # Add volume for secret files
+            secret_volumes.append(
+                client.V1Volume(
+                    name=f"secret-{secret_name}",
+                    secret=client.V1SecretVolumeSource(secret_name=secret_k8s_name)
+                )
+            )
+            
+            # Add volume mount for secret files
+            secret_volume_mounts.append(
+                client.V1VolumeMount(
+                    name=f"secret-{secret_name}",
+                    mount_path=f"/k8r/secret/{secret_name}",
+                    read_only=True
+                )
+            )
+            
+            # Add environment variables for each key in the secret
+            for key in secret_info["data_keys"]:
+                env_var_name = f"{secret_name.upper()}_{key.upper()}".replace("-", "_").replace(".", "_")
+                secret_env_vars.append(
+                    client.V1EnvVar(
+                        name=env_var_name,
+                        value_from=client.V1EnvVarSource(
+                            secret_key_ref=client.V1SecretKeySelector(
+                                name=secret_k8s_name,
+                                key=key
+                            )
+                        )
+                    )
+                )
+        
+        # Add secret volumes to existing volumes
+        volumes.extend(secret_volumes)
+        
+        # Update container with secret mounts and env vars
+        if hasattr(container, 'volume_mounts') and container.volume_mounts:
+            container.volume_mounts.extend(secret_volume_mounts)
+        else:
+            container.volume_mounts = secret_volume_mounts
+            
+        if hasattr(container, 'env') and container.env:
+            container.env.extend(secret_env_vars)
+        else:
+            container.env = secret_env_vars
+        
+        if job_secrets:
+            print(f"Mounting {len(job_secrets)} secrets for job '{final_job_name}'")
+        
         # Create job with k8r labels
         job = client.V1Job(
             metadata=client.V1ObjectMeta(
@@ -505,6 +564,9 @@ fi
                 if e.status != 404:
                     print(f"Warning: Could not delete configmap: {e}")
             
+            # Delete associated secrets
+            self.delete_job_secrets(job_name)
+            
             print(f"Job '{job_name}' deleted")
             
         except ApiException as e:
@@ -512,6 +574,131 @@ fi
                 print(f"Job '{job_name}' not found")
             else:
                 print(f"Error deleting job: {e}")
+
+    def delete_job_secrets(self, job_name: str) -> None:
+        """Delete all secrets associated with a job"""
+        try:
+            secrets = self.core_v1.list_namespaced_secret(
+                namespace=self.namespace,
+                label_selector=f"created-by=k8r,k8r-job={job_name}"
+            )
+            
+            for secret in secrets.items:
+                try:
+                    self.core_v1.delete_namespaced_secret(
+                        name=secret.metadata.name,
+                        namespace=self.namespace
+                    )
+                    print(f"Deleted secret '{secret.metadata.name}'")
+                except ApiException as e:
+                    if e.status != 404:
+                        print(f"Warning: Could not delete secret {secret.metadata.name}: {e}")
+        except Exception as e:
+            print(f"Warning: Error listing secrets for cleanup: {e}")
+
+    def get_job_name_from_directory(self) -> str:
+        """Get job name from current directory"""
+        return os.path.basename(os.getcwd())
+
+    def get_job_secrets(self, job_name: str) -> List[Dict]:
+        """Get all secrets associated with a job"""
+        try:
+            secrets = self.core_v1.list_namespaced_secret(
+                namespace=self.namespace,
+                label_selector=f"created-by=k8r,k8r-job={job_name}"
+            )
+            
+            secret_list = []
+            for secret in secrets.items:
+                secret_name = secret.metadata.labels.get("k8r-secret", "")
+                secret_list.append({
+                    "name": secret.metadata.name,
+                    "secret_name": secret_name,
+                    "data_keys": list(secret.data.keys()) if secret.data else []
+                })
+            
+            return secret_list
+        except Exception as e:
+            print(f"Warning: Error listing secrets for job {job_name}: {e}")
+            return []
+
+    def create_secret(self, secret_name: str, secret_value: str) -> None:
+        """Create a Kubernetes secret with k8r labels"""
+        job_name = self.get_job_name_from_directory()
+        full_secret_name = f"{job_name}-{secret_name}"
+        
+        # Prepare secret data
+        secret_data = {}
+        
+        # Determine if secret_value is a file, directory, or string
+        if os.path.isfile(secret_value):
+            # Read file contents
+            try:
+                with open(secret_value, 'rb') as f:
+                    content = f.read()
+                # Use base64 encoding for binary data
+                secret_data[secret_name] = base64.b64encode(content).decode('utf-8')
+                print(f"Creating secret '{full_secret_name}' from file '{secret_value}'")
+            except Exception as e:
+                print(f"Error reading file {secret_value}: {e}")
+                return
+        elif os.path.isdir(secret_value):
+            # Read all files in directory
+            try:
+                for root, dirs, files in os.walk(secret_value):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        # Use relative path from secret_value as key
+                        relative_path = os.path.relpath(file_path, secret_value)
+                        # Replace path separators with underscores for secret key
+                        key = relative_path.replace(os.path.sep, '_').replace('/', '_')
+                        
+                        with open(file_path, 'rb') as f:
+                            content = f.read()
+                        secret_data[key] = base64.b64encode(content).decode('utf-8')
+                
+                print(f"Creating secret '{full_secret_name}' from directory '{secret_value}' with {len(secret_data)} files")
+            except Exception as e:
+                print(f"Error reading directory {secret_value}: {e}")
+                return
+        else:
+            # Treat as string value
+            secret_data[secret_name] = base64.b64encode(secret_value.encode('utf-8')).decode('utf-8')
+            print(f"Creating secret '{full_secret_name}' with string value")
+        
+        # Create the secret
+        secret = client.V1Secret(
+            metadata=client.V1ObjectMeta(
+                name=full_secret_name,
+                labels={
+                    "created-by": "k8r",
+                    "k8r-job": job_name,
+                    "k8r-secret": secret_name
+                }
+            ),
+            data=secret_data,
+            type="Opaque"
+        )
+        
+        try:
+            self.core_v1.create_namespaced_secret(
+                namespace=self.namespace,
+                body=secret
+            )
+            print(f"Secret '{full_secret_name}' created successfully")
+        except ApiException as e:
+            if e.status == 409:  # Already exists
+                # Replace existing secret
+                self.core_v1.replace_namespaced_secret(
+                    name=full_secret_name,
+                    namespace=self.namespace,
+                    body=secret
+                )
+                print(f"Secret '{full_secret_name}' updated successfully")
+            else:
+                print(f"Error creating secret: {e}")
+        except Exception as e:
+            print(f"Error creating secret: {e}")
 
 
 
@@ -542,7 +729,7 @@ k8r() {{
 
 def main():
     # Check if first argument is a known subcommand
-    subcommands = ["ls", "logs", "rm", "env"]
+    subcommands = ["ls", "logs", "rm", "env", "secret"]
     
     if len(sys.argv) > 1 and sys.argv[1] in subcommands:
         # Handle subcommands
@@ -568,6 +755,14 @@ def main():
             args = parser.parse_args(sys.argv[2:])
             k8r = K8sRun()
             k8r.delete_job(args.job_name, args.force)
+            return
+        elif sys.argv[1] == "secret":
+            parser = argparse.ArgumentParser(description="Manage secrets")
+            parser.add_argument("secret_name", help="Secret name")
+            parser.add_argument("secret_value", help="Secret value (string, file path, or directory path)")
+            args = parser.parse_args(sys.argv[2:])
+            k8r = K8sRun()
+            k8r.create_secret(args.secret_name, args.secret_value)
             return
     
     # Handle main run command
