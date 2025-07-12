@@ -90,7 +90,12 @@ class K8sRun:
         if job_name:
             base_name = job_name
         elif source == "." or source == "./":
-            base_name = os.path.basename(os.getcwd())
+            # Use the original working directory if available, otherwise current directory
+            original_pwd = os.environ.get('K8R_ORIGINAL_PWD')
+            if original_pwd and os.path.isdir(original_pwd):
+                base_name = os.path.basename(original_pwd)
+            else:
+                base_name = os.path.basename(os.getcwd())
         elif self.detect_source_type(source) == "github":
             base_name = source.split("/")[-1].replace(".git", "")
         elif self.detect_source_type(source) == "directory":
@@ -597,7 +602,11 @@ fi
             print(f"Warning: Error listing secrets for cleanup: {e}")
 
     def get_job_name_from_directory(self) -> str:
-        """Get job name from current directory"""
+        """Get job name from current directory, preferring original working directory"""
+        # Check if we have the original working directory from shell function
+        original_pwd = os.environ.get('K8R_ORIGINAL_PWD')
+        if original_pwd and os.path.isdir(original_pwd):
+            return os.path.basename(original_pwd)
         return os.path.basename(os.getcwd())
 
     def get_job_secrets(self, job_name: str) -> List[Dict]:
@@ -699,7 +708,503 @@ fi
                 print(f"Error creating secret: {e}")
         except Exception as e:
             print(f"Error creating secret: {e}")
+    
+    def create_secret_with_options(self, secret_name: str, secret_value: str, 
+                                 job_name: Optional[str] = None, show_yaml: bool = False) -> None:
+        """Create a secret with additional options like custom job name and YAML output"""
+        original_job_name = self.get_job_name_from_directory()
+        
+        # Use provided job name or fall back to directory-based name
+        effective_job_name = job_name if job_name else original_job_name
+        full_secret_name = f"{effective_job_name}-{secret_name}"
+        
+        # Prepare secret data (same logic as original create_secret)
+        secret_data = {}
+        
+        if os.path.isfile(secret_value):
+            try:
+                with open(secret_value, 'rb') as f:
+                    content = f.read()
+                secret_data[secret_name] = base64.b64encode(content).decode('utf-8')
+                print(f"Creating secret '{full_secret_name}' from file '{secret_value}'")
+            except Exception as e:
+                print(f"Error reading file {secret_value}: {e}")
+                return
+        elif os.path.isdir(secret_value):
+            try:
+                for root, dirs, files in os.walk(secret_value):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        relative_path = os.path.relpath(file_path, secret_value)
+                        key = relative_path.replace(os.path.sep, '_').replace('/', '_')
+                        
+                        with open(file_path, 'rb') as f:
+                            content = f.read()
+                        secret_data[key] = base64.b64encode(content).decode('utf-8')
+                
+                print(f"Creating secret '{full_secret_name}' from directory '{secret_value}' with {len(secret_data)} files")
+            except Exception as e:
+                print(f"Error reading directory {secret_value}: {e}")
+                return
+        else:
+            secret_data[secret_name] = base64.b64encode(secret_value.encode('utf-8')).decode('utf-8')
+            print(f"Creating secret '{full_secret_name}' with string value")
+        
+        # Create the secret object
+        secret = client.V1Secret(
+            metadata=client.V1ObjectMeta(
+                name=full_secret_name,
+                labels={
+                    "created-by": "k8r",
+                    "k8r-job": effective_job_name,
+                    "k8r-secret": secret_name
+                }
+            ),
+            data=secret_data,
+            type="Opaque"
+        )
+        
+        if show_yaml:
+            # Convert to YAML and print
+            secret_dict = client.ApiClient().sanitize_for_serialization(secret)
+            secret_dict['apiVersion'] = 'v1'
+            secret_dict['kind'] = 'Secret'
+            print(yaml.dump(secret_dict, default_flow_style=False))
+            return
+        
+        # Apply the secret
+        try:
+            self.core_v1.create_namespaced_secret(
+                namespace=self.namespace,
+                body=secret
+            )
+            print(f"Secret '{full_secret_name}' created successfully")
+        except ApiException as e:
+            if e.status == 409:
+                self.core_v1.replace_namespaced_secret(
+                    name=full_secret_name,
+                    namespace=self.namespace,
+                    body=secret
+                )
+                print(f"Secret '{full_secret_name}' updated successfully")
+            else:
+                print(f"Error creating secret: {e}")
+        except Exception as e:
+            print(f"Error creating secret: {e}")
+    
+    def run_job_with_options(self, source: str, command: List[str], num_instances: int = 1, 
+                           timeout: str = "1h", base_image: str = "alpine:latest", 
+                           job_name: Optional[str] = None, detach: bool = False,
+                           show_yaml: bool = False, as_deployment: bool = False) -> None:
+        """Create and run a job with additional options"""
+        
+        if as_deployment:
+            job_name = self.create_deployment(
+                source=source, command=command, num_instances=num_instances,
+                timeout=timeout, base_image=base_image, job_name=job_name,
+                show_yaml=show_yaml
+            )
+            if not show_yaml:
+                print(f"Deployment '{job_name}' created")
+        else:
+            job_name = self.create_job_with_yaml_option(
+                source=source, command=command, num_instances=num_instances,
+                timeout=timeout, base_image=base_image, job_name=job_name,
+                show_yaml=show_yaml
+            )
+            if not show_yaml:
+                self.monitor_job(job_name, detach)
+    
+    def create_job_with_yaml_option(self, source: str, command: List[str], num_instances: int = 1, 
+                                  timeout: str = "1h", base_image: str = "alpine:latest", 
+                                  job_name: Optional[str] = None, show_yaml: bool = False) -> str:
+        """Create a job with option to output YAML instead of applying"""
+        
+        source_type = self.detect_source_type(source)
+        final_job_name = self.generate_job_name(source, job_name)
+        
+        # Convert timeout to seconds
+        timeout_seconds = self.parse_timeout(timeout)
+        
+        # Create job spec based on source type (same logic as original create_job)
+        volumes = []
+        if source_type == "directory":
+            if not show_yaml:
+                configmap_name = self.create_directory_configmap(source, final_job_name)
+            else:
+                configmap_name = f"{final_job_name}-source"
+            container = self.create_directory_container(configmap_name, command, base_image)
+            volumes = [
+                client.V1Volume(
+                    name="source",
+                    config_map=client.V1ConfigMapVolumeSource(name=configmap_name)
+                )
+            ]
+        elif source_type == "github":
+            container = self.create_github_container(source, command, base_image)
+        elif source_type == "dockerfile":
+            if not show_yaml:
+                image_name = self.build_and_push_dockerfile(source, final_job_name)
+            else:
+                image_name = f"registry/project/{final_job_name}:latest"
+            container = self.create_container_container(image_name, command)
+        elif source_type == "container":
+            container = self.create_container_container(source, command)
+        else:
+            raise ValueError(f"Unsupported source type: {source_type}")
+        
+        # Handle secrets (skip for show_yaml mode to avoid side effects)
+        secret_volumes = []
+        secret_volume_mounts = []
+        secret_env_vars = []
+        
+        if not show_yaml:
+            job_secrets = self.get_job_secrets(final_job_name)
+            for secret_info in job_secrets:
+                secret_name = secret_info["secret_name"]
+                secret_k8s_name = secret_info["name"]
+                
+                secret_volumes.append(
+                    client.V1Volume(
+                        name=f"secret-{secret_name}",
+                        secret=client.V1SecretVolumeSource(secret_name=secret_k8s_name)
+                    )
+                )
+                
+                secret_volume_mounts.append(
+                    client.V1VolumeMount(
+                        name=f"secret-{secret_name}",
+                        mount_path=f"/k8r/secret/{secret_name}",
+                        read_only=True
+                    )
+                )
+                
+                for key in secret_info["data_keys"]:
+                    env_var_name = f"{secret_name.upper()}_{key.upper()}".replace("-", "_").replace(".", "_")
+                    secret_env_vars.append(
+                        client.V1EnvVar(
+                            name=env_var_name,
+                            value_from=client.V1EnvVarSource(
+                                secret_key_ref=client.V1SecretKeySelector(
+                                    name=secret_k8s_name,
+                                    key=key
+                                )
+                            )
+                        )
+                    )
+            
+            volumes.extend(secret_volumes)
+            
+            if hasattr(container, 'volume_mounts') and container.volume_mounts:
+                container.volume_mounts.extend(secret_volume_mounts)
+            else:
+                container.volume_mounts = secret_volume_mounts
+                
+            if hasattr(container, 'env') and container.env:
+                container.env.extend(secret_env_vars)
+            else:
+                container.env = secret_env_vars
+            
+            if job_secrets:
+                print(f"Mounting {len(job_secrets)} secrets for job '{final_job_name}'")
+        
+        # Create job with k8r labels
+        job = client.V1Job(
+            metadata=client.V1ObjectMeta(
+                name=final_job_name,
+                labels={
+                    "created-by": "k8r",
+                    "k8r-source-type": source_type
+                }
+            ),
+            spec=client.V1JobSpec(
+                parallelism=num_instances,
+                completions=num_instances,
+                active_deadline_seconds=timeout_seconds,
+                template=client.V1PodTemplateSpec(
+                    metadata=client.V1ObjectMeta(
+                        labels={
+                            "created-by": "k8r",
+                            "k8r-job": final_job_name
+                        }
+                    ),
+                    spec=client.V1PodSpec(
+                        containers=[container],
+                        volumes=volumes,
+                        restart_policy="Never"
+                    )
+                )
+            )
+        )
+        
+        if show_yaml:
+            # Convert to YAML and print
+            job_dict = client.ApiClient().sanitize_for_serialization(job)
+            job_dict['apiVersion'] = 'batch/v1'
+            job_dict['kind'] = 'Job'
+            print(yaml.dump(job_dict, default_flow_style=False))
+            return final_job_name
+        
+        # Apply the job
+        self.batch_v1.create_namespaced_job(namespace=self.namespace, body=job)
+        return final_job_name
+    
+    def create_deployment(self, source: str, command: List[str], num_instances: int = 1, 
+                         timeout: str = "1h", base_image: str = "alpine:latest", 
+                         job_name: Optional[str] = None, show_yaml: bool = False) -> str:
+        """Create a Deployment instead of a Job"""
+        
+        source_type = self.detect_source_type(source)
+        final_deployment_name = self.generate_job_name(source, job_name)
+        
+        # Create container spec (same logic as job creation)
+        volumes = []
+        if source_type == "directory":
+            if not show_yaml:
+                configmap_name = self.create_directory_configmap(source, final_deployment_name)
+            else:
+                configmap_name = f"{final_deployment_name}-source"
+            container = self.create_directory_container(configmap_name, command, base_image)
+            volumes = [
+                client.V1Volume(
+                    name="source",
+                    config_map=client.V1ConfigMapVolumeSource(name=configmap_name)
+                )
+            ]
+        elif source_type == "github":
+            container = self.create_github_container(source, command, base_image)
+        elif source_type == "dockerfile":
+            if not show_yaml:
+                image_name = self.build_and_push_dockerfile(source, final_deployment_name)
+            else:
+                image_name = f"registry/project/{final_deployment_name}:latest"
+            container = self.create_container_container(image_name, command)
+        elif source_type == "container":
+            container = self.create_container_container(source, command)
+        else:
+            raise ValueError(f"Unsupported source type: {source_type}")
+        
+        # Handle secrets (skip for show_yaml mode)
+        secret_volumes = []
+        secret_volume_mounts = []
+        secret_env_vars = []
+        
+        if not show_yaml:
+            job_secrets = self.get_job_secrets(final_deployment_name)
+            for secret_info in job_secrets:
+                secret_name = secret_info["secret_name"]
+                secret_k8s_name = secret_info["name"]
+                
+                secret_volumes.append(
+                    client.V1Volume(
+                        name=f"secret-{secret_name}",
+                        secret=client.V1SecretVolumeSource(secret_name=secret_k8s_name)
+                    )
+                )
+                
+                secret_volume_mounts.append(
+                    client.V1VolumeMount(
+                        name=f"secret-{secret_name}",
+                        mount_path=f"/k8r/secret/{secret_name}",
+                        read_only=True
+                    )
+                )
+                
+                for key in secret_info["data_keys"]:
+                    env_var_name = f"{secret_name.upper()}_{key.upper()}".replace("-", "_").replace(".", "_")
+                    secret_env_vars.append(
+                        client.V1EnvVar(
+                            name=env_var_name,
+                            value_from=client.V1EnvVarSource(
+                                secret_key_ref=client.V1SecretKeySelector(
+                                    name=secret_k8s_name,
+                                    key=key
+                                )
+                            )
+                        )
+                    )
+            
+            volumes.extend(secret_volumes)
+            
+            if hasattr(container, 'volume_mounts') and container.volume_mounts:
+                container.volume_mounts.extend(secret_volume_mounts)
+            else:
+                container.volume_mounts = secret_volume_mounts
+                
+            if hasattr(container, 'env') and container.env:
+                container.env.extend(secret_env_vars)
+            else:
+                container.env = secret_env_vars
+        
+        # Create deployment
+        deployment = client.V1Deployment(
+            metadata=client.V1ObjectMeta(
+                name=final_deployment_name,
+                labels={
+                    "created-by": "k8r",
+                    "k8r-source-type": source_type,
+                    "k8r-type": "deployment"
+                }
+            ),
+            spec=client.V1DeploymentSpec(
+                replicas=num_instances,
+                selector=client.V1LabelSelector(
+                    match_labels={
+                        "created-by": "k8r",
+                        "k8r-deployment": final_deployment_name
+                    }
+                ),
+                template=client.V1PodTemplateSpec(
+                    metadata=client.V1ObjectMeta(
+                        labels={
+                            "created-by": "k8r",
+                            "k8r-deployment": final_deployment_name
+                        }
+                    ),
+                    spec=client.V1PodSpec(
+                        containers=[container],
+                        volumes=volumes
+                    )
+                )
+            )
+        )
+        
+        if show_yaml:
+            # Convert to YAML and print
+            deployment_dict = client.ApiClient().sanitize_for_serialization(deployment)
+            deployment_dict['apiVersion'] = 'apps/v1'
+            deployment_dict['kind'] = 'Deployment'
+            print(yaml.dump(deployment_dict, default_flow_style=False))
+            return final_deployment_name
+        
+        # Apply the deployment
+        apps_v1 = client.AppsV1Api()
+        apps_v1.create_namespaced_deployment(namespace=self.namespace, body=deployment)
+        return final_deployment_name
 
+
+
+def update_k8r(branch: str = "main") -> None:
+    """Update k8r installation to latest version of specified branch"""
+    # Get the directory where this script is located
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    print(f"🔄 Updating k8r to latest '{branch}' branch...")
+    
+    try:
+        # Check if we're in a git repository
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=script_dir,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        
+        # Get current branch and commit info before update
+        current_branch_result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=script_dir,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        current_branch = current_branch_result.stdout.strip()
+        
+        # Fetch latest changes
+        print(f"📥 Fetching latest changes...")
+        subprocess.run(
+            ["git", "fetch", "origin"],
+            cwd=script_dir,
+            check=True
+        )
+        
+        # Check if target branch exists on remote
+        remote_branch_check = subprocess.run(
+            ["git", "ls-remote", "--heads", "origin", branch],
+            cwd=script_dir,
+            capture_output=True,
+            text=True
+        )
+        
+        if not remote_branch_check.stdout.strip():
+            print(f"❌ Error: Branch '{branch}' does not exist on remote")
+            print(f"💡 Available branches can be seen with: git branch -r")
+            sys.exit(1)
+        
+        # Switch to the target branch if different from current
+        if current_branch != branch:
+            print(f"🔀 Switching from '{current_branch}' to '{branch}' branch...")
+            try:
+                subprocess.run(
+                    ["git", "checkout", branch],
+                    cwd=script_dir,
+                    check=True
+                )
+            except subprocess.CalledProcessError:
+                print(f"❌ Error: Could not switch to branch '{branch}'")
+                print(f"💡 You may have uncommitted changes. Try: git stash")
+                sys.exit(1)
+        
+        # Pull latest changes
+        print(f"⬇️  Pulling latest changes from '{branch}'...")
+        subprocess.run(
+            ["git", "pull", "origin", branch],
+            cwd=script_dir,
+            check=True
+        )
+        
+        # Get updated commit information
+        commit_hash_result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=script_dir,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        commit_hash = commit_hash_result.stdout.strip()
+        
+        commit_message_result = subprocess.run(
+            ["git", "log", "-1", "--pretty=format:%s"],
+            cwd=script_dir,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        commit_message = commit_message_result.stdout.strip()
+        
+        commit_date_result = subprocess.run(
+            ["git", "log", "-1", "--pretty=format:%cd", "--date=short"],
+            cwd=script_dir,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        commit_date = commit_date_result.stdout.strip()
+        
+        # Update dependencies if needed
+        venv_dir = os.path.join(script_dir, ".venv")
+        if os.path.exists(venv_dir):
+            print(f"📦 Updating dependencies...")
+            subprocess.run(
+                ["uv", "sync"],
+                cwd=script_dir,
+                check=True
+            )
+        
+        print(f"✅ Updated to {commit_hash} - {commit_message} ({commit_date})")
+        
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Error updating k8r: {e}")
+        print(f"💡 Make sure you're in a git repository and have network access")
+        sys.exit(1)
+    except FileNotFoundError:
+        print(f"❌ Error: git command not found")
+        print(f"💡 Please install git to use the update command")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Unexpected error during update: {e}")
+        sys.exit(1)
 
 
 def print_env_setup():
@@ -713,6 +1218,7 @@ def print_env_setup():
 k8r() {{
     local k8r_dir="{script_dir}"
     local venv_dir="$k8r_dir/.venv"
+    local original_pwd="$PWD"
     
     # Check if virtual environment exists
     if [ ! -d "$venv_dir" ]; then
@@ -720,59 +1226,81 @@ k8r() {{
         (cd "$k8r_dir" && uv sync)
     fi
     
-    # Activate venv and run k8r
-    (cd "$k8r_dir" && source .venv/bin/activate && python k8r.py "$@")
+    # Activate venv and run k8r with original working directory
+    (cd "$k8r_dir" && source .venv/bin/activate && K8R_ORIGINAL_PWD="$original_pwd" python k8r.py "$@")
 }}
 '''
     print(setup_script)
 
 
 def main():
-    # Check if first argument is a known subcommand
-    subcommands = ["ls", "logs", "rm", "env", "secret"]
+    # Main parser
+    parser = argparse.ArgumentParser(
+        description="k8s-run (k8r) - Run jobs in Kubernetes",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Commands:
+  run       Create and run a Kubernetes job (default)
+  ls        List k8r jobs
+  logs      Show job logs  
+  rm        Delete a job
+  secret    Manage secrets
+  update    Update k8r to latest version
+  env       Print shell integration code
+
+Examples:
+  k8r run ./ --num 4 -- python my_script.py
+  k8r redis:7.0 -- redis-server --version
+  k8r ls
+  k8r logs my-job
+  k8r rm my-job
+  k8r update
+        """
+    )
     
-    if len(sys.argv) > 1 and sys.argv[1] in subcommands:
-        # Handle subcommands
-        if sys.argv[1] == "env":
-            print_env_setup()
-            return
-        elif sys.argv[1] == "ls":
-            k8r = K8sRun()
-            k8r.list_jobs()
-            return
-        elif sys.argv[1] == "logs":
-            parser = argparse.ArgumentParser(description="Show job logs")
-            parser.add_argument("job_name", help="Job name")
-            parser.add_argument("-f", "--follow", action="store_true", help="Follow logs")
-            args = parser.parse_args(sys.argv[2:])
-            k8r = K8sRun()
-            k8r.get_job_logs(args.job_name, args.follow)
-            return
-        elif sys.argv[1] == "rm":
-            parser = argparse.ArgumentParser(description="Delete job")
-            parser.add_argument("job_name", help="Job name")
-            parser.add_argument("-f", "--force", action="store_true", help="Force delete")
-            args = parser.parse_args(sys.argv[2:])
-            k8r = K8sRun()
-            k8r.delete_job(args.job_name, args.force)
-            return
-        elif sys.argv[1] == "secret":
-            parser = argparse.ArgumentParser(description="Manage secrets")
-            parser.add_argument("secret_name", help="Secret name")
-            parser.add_argument("secret_value", help="Secret value (string, file path, or directory path)")
-            args = parser.parse_args(sys.argv[2:])
-            k8r = K8sRun()
-            k8r.create_secret(args.secret_name, args.secret_value)
-            return
+    # Add global options
+    parser.add_argument("--namespace", help="Kubernetes namespace (overrides kubeconfig context)")
     
-    # Handle main run command
-    parser = argparse.ArgumentParser(description="k8s-run (k8r) - Run jobs in Kubernetes")
-    parser.add_argument("source", help="Source: directory, GitHub URL, Dockerfile, or container image")
-    parser.add_argument("--num", type=int, default=1, help="Number of job instances")
-    parser.add_argument("--timeout", default="1h", help="Job timeout (e.g., 1h, 30m, 3600s)")
-    parser.add_argument("--base-image", default="alpine:latest", help="Base container image")
-    parser.add_argument("--job-name", help="Override job name")
-    parser.add_argument("-d", "--detach", action="store_true", help="Run in background")
+    # Create subparsers
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    
+    # Run command (default)
+    run_parser = subparsers.add_parser("run", help="Create and run a Kubernetes job")
+    run_parser.add_argument("source", help="Source: directory, GitHub URL, Dockerfile, or container image")
+    run_parser.add_argument("--num", type=int, default=1, help="Number of job instances")
+    run_parser.add_argument("--timeout", default="1h", help="Job timeout (e.g., 1h, 30m, 3600s)")
+    run_parser.add_argument("--base-image", default="alpine:latest", help="Base container image")
+    run_parser.add_argument("--job-name", help="Override job name")
+    run_parser.add_argument("-d", "--detach", action="store_true", help="Run in background")
+    run_parser.add_argument("--show-yaml", action="store_true", help="Print YAML to stdout instead of applying")
+    run_parser.add_argument("--as-deployment", action="store_true", help="Create as Deployment instead of Job")
+    
+    # List command
+    ls_parser = subparsers.add_parser("ls", help="List k8r jobs")
+    
+    # Logs command
+    logs_parser = subparsers.add_parser("logs", help="Show job logs")
+    logs_parser.add_argument("job_name", help="Job name")
+    logs_parser.add_argument("-f", "--follow", action="store_true", help="Follow logs")
+    
+    # Remove command
+    rm_parser = subparsers.add_parser("rm", help="Delete a job")
+    rm_parser.add_argument("job_name", help="Job name")
+    rm_parser.add_argument("-f", "--force", action="store_true", help="Force delete")
+    
+    # Secret command
+    secret_parser = subparsers.add_parser("secret", help="Manage secrets")
+    secret_parser.add_argument("secret_name", help="Secret name")
+    secret_parser.add_argument("secret_value", help="Secret value (string, file path, or directory path)")
+    secret_parser.add_argument("--job-name", help="Override job name for secret association")
+    secret_parser.add_argument("--show-yaml", action="store_true", help="Print YAML to stdout instead of applying")
+    
+    # Update command
+    update_parser = subparsers.add_parser("update", help="Update k8r to latest version")
+    update_parser.add_argument("branch", nargs="?", default="main", help="Git branch to update to (default: main)")
+    
+    # Env command
+    env_parser = subparsers.add_parser("env", help="Print shell integration code")
     
     # Look for -- separator to split k8r args from command args
     if "--" in sys.argv:
@@ -783,27 +1311,58 @@ def main():
         k8r_args = sys.argv[1:]
         command_args = []
     
+    # Handle case where no subcommand is given but there are args - assume 'run'
+    if k8r_args and k8r_args[0] not in ["run", "ls", "logs", "rm", "secret", "update", "env"] and not k8r_args[0].startswith("-"):
+        k8r_args.insert(0, "run")
+    
     # If no arguments provided, show help
     if not k8r_args:
         parser.print_help()
-        print(f"\nAvailable subcommands: {', '.join(subcommands)}")
         return
     
     args = parser.parse_args(k8r_args)
     
-    # Initialize K8sRun and create job
-    k8r = K8sRun()
+    # Handle global namespace override
+    namespace_override = args.namespace if hasattr(args, 'namespace') and args.namespace else None
     
-    command = command_args if command_args else ["echo", "No command specified"]
-    job_name = k8r.create_job(
-        source=args.source,
-        command=command,
-        num_instances=args.num,
-        timeout=args.timeout,
-        base_image=args.base_image,
-        job_name=args.job_name
-    )
-    k8r.monitor_job(job_name, args.detach)
+    # Handle commands
+    if args.command == "env":
+        print_env_setup()
+        return
+    elif args.command == "update":
+        update_k8r(args.branch)
+        return
+    
+    # Initialize K8sRun with namespace override
+    k8r = K8sRun()
+    if namespace_override:
+        k8r.namespace = namespace_override
+    
+    if args.command == "ls":
+        k8r.list_jobs()
+    elif args.command == "logs":
+        k8r.get_job_logs(args.job_name, args.follow)
+    elif args.command == "rm":
+        k8r.delete_job(args.job_name, args.force)
+    elif args.command == "secret":
+        k8r.create_secret_with_options(args.secret_name, args.secret_value, 
+                                     job_name=args.job_name, show_yaml=args.show_yaml)
+    elif args.command == "run" or args.command is None:
+        # Handle run command
+        command = command_args if command_args else ["echo", "No command specified"]
+        k8r.run_job_with_options(
+            source=args.source,
+            command=command,
+            num_instances=args.num,
+            timeout=args.timeout,
+            base_image=args.base_image,
+            job_name=args.job_name,
+            detach=args.detach,
+            show_yaml=args.show_yaml,
+            as_deployment=args.as_deployment
+        )
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":

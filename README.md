@@ -103,6 +103,12 @@ k8r ./ --num 8 -- python run_script.py --arg1 value1
 
 # Use a specific timeout
 k8r ./ --timeout 30m -- ./my_script.sh
+
+# Create as deployment instead of job
+k8r ./ --as-deployment --num 3 -- python web_server.py
+
+# Preview YAML without applying
+k8r ./ --show-yaml -- python process.py
 ```
 
 ### 🐙 Run from GitHub
@@ -135,15 +141,63 @@ k8r redis:7.0 -- redis-server --port 6380
 k8r ubuntu:22.04 -- bash -c "apt update && apt install -y curl"
 ```
 
+### 🔐 Managing Secrets
+
+```bash
+# Create secret from string
+k8r secret api-key "my-secret-value"
+
+# Create secret from file
+k8r secret database-cert ./db.crt
+
+# Create secret from directory (all files)
+k8r secret app-config ./config/
+
+# Preview secret YAML
+k8r secret my-secret "value" --show-yaml
+
+# Associate secret with specific job
+k8r secret api-key "value" --job-name my-custom-job
+```
+
+### 🌐 Namespace Management
+
+```bash
+# Run in specific namespace
+k8r --namespace production ./ -- python app.py
+
+# List jobs in specific namespace
+k8r --namespace staging ls
+
+# All commands support namespace override
+k8r --namespace dev secret api-key "value"
+```
+
 > 💡 **Pro Tip**: Without shell integration, run from the k8s-run directory:  
 > `cd /path/to/k8s-run && uv run python k8r.py ./ --num 8 -- python run_script.py`
 
 ## 📖 Command Reference
 
-### 🎯 Main Command
+### 🎯 Main Commands
+
+k8r uses subcommands to organize functionality. The `run` command is used by default when no subcommand is specified.
 
 ```bash
-k8r SOURCE [OPTIONS] -- COMMAND [ARGS...]
+k8r [GLOBAL_OPTIONS] COMMAND [COMMAND_OPTIONS] -- [ARGS...]
+```
+
+#### Global Options
+
+| Option | Description | Example |
+|--------|-------------|---------|
+| `--namespace NAMESPACE` | Kubernetes namespace (overrides kubeconfig context) | `--namespace my-ns` |
+
+### 🚀 Run Command (Default)
+
+Create and run Kubernetes Jobs or Deployments.
+
+```bash
+k8r [run] SOURCE [OPTIONS] -- COMMAND [ARGS...]
 ```
 
 | Option | Description | Default | Example |
@@ -153,8 +207,10 @@ k8r SOURCE [OPTIONS] -- COMMAND [ARGS...]
 | `--base-image IMAGE` | Base container for directory/GitHub mode | `alpine:latest` | `--base-image python:3.9` |
 | `--job-name NAME` | Custom job name | auto-generated | `--job-name my-job` |
 | `-d, --detach` | Run in background without monitoring | disabled | `-d` |
+| `--show-yaml` | Print YAML to stdout instead of applying | disabled | `--show-yaml` |
+| `--as-deployment` | Create as Deployment instead of Job | disabled | `--as-deployment` |
 
-### 🛠️ Job Management
+### 🛠️ Management Commands
 
 | Command | Description | Example |
 |---------|-------------|---------|
@@ -163,7 +219,43 @@ k8r SOURCE [OPTIONS] -- COMMAND [ARGS...]
 | `k8r logs <job-name> -f` | 📺 Follow logs in real-time | `k8r logs my-job -f` |
 | `k8r rm <job-name>` | 🗑️ Delete a job | `k8r rm my-job` |
 | `k8r rm <job-name> -f` | ⚠️ Force delete (even with running pods) | `k8r rm my-job -f` |
+
+### 🔐 Secret Management
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `k8r secret <name> <value>` | 🔒 Create secret from string/file/directory | `k8r secret api-key "secret123"` |
+| `k8r secret <name> <file>` | 📄 Create secret from file | `k8r secret cert ./tls.crt` |
+| `k8r secret <name> <dir>` | 📁 Create secret from directory | `k8r secret config ./config/` |
+
+Secret command options:
+- `--job-name NAME`: Override job name for secret association
+- `--show-yaml`: Print YAML to stdout instead of applying
+
+### 🔧 Utility Commands
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `k8r update` | 🔄 Update k8r to latest main branch | `k8r update` |
+| `k8r update <branch>` | 🔄 Update k8r to specific branch | `k8r update develop` |
 | `k8r env` | 🔧 Print shell integration code | `k8r env` |
+
+### 🔄 Self-Updating
+
+```bash
+# Update to latest main branch
+k8r update
+
+# Switch to and update a different branch
+k8r update develop
+
+# Example output:
+# 🔄 Updating k8r to latest 'main' branch...
+# 📥 Fetching latest changes...
+# ⬇️ Pulling latest changes from 'main'...
+# 📦 Updating dependencies...
+# ✅ Updated to a1b2c3d - Add new feature (2025-07-12)
+```
 
 ### 📊 Example Output
 
@@ -184,6 +276,18 @@ redis-test   | container  | 1       | 0       | 1        | 0
 | `K8R_NAMESPACE` | Kubernetes namespace | *auto-detected from kubeconfig* |
 | `K8R_REGISTRY` | Docker registry for Dockerfile mode | `gcr.io` |
 | `K8R_PROJECT` | Registry project for Dockerfile mode | `default-project` |
+| `K8R_ORIGINAL_PWD` | Original working directory (set by shell function) | *auto-set* |
+
+### 🆕 New Features
+
+- **🔄 Subcommand Organization**: Clear command structure with `run`, `ls`, `logs`, `rm`, `secret`, and `env`
+- **🎯 Default Run Command**: Use `k8r ./ -- command` or `k8r run ./ -- command` interchangeably
+- **📋 YAML Preview**: Use `--show-yaml` to see generated Kubernetes YAML before applying
+- **🚀 Deployment Mode**: Use `--as-deployment` to create long-running Deployments instead of Jobs
+- **🌐 Namespace Support**: Global `--namespace` option works with all commands
+- **🔐 Enhanced Secrets**: `k8r secret` command supports `--job-name` and `--show-yaml` options
+- **📍 Context Preservation**: Shell function now preserves original working directory for accurate job naming
+- **🔄 Self-Updating**: `k8r update` command for easy updates with branch switching support
 
 ### 🚀 Startup Scripts
 

@@ -55,6 +55,30 @@ In addition to arg clarity there are a few extra features at the end to implemen
 ### Work Log
 
 - [2025-07-11 19:16:49] Task setup completed, TASK_MEMORY.md created
+- [2025-07-12] Refactored main() function to use argparse subparsers for better command organization
+- [2025-07-12] Implemented "run" as default command when no subcommand is specified
+- [2025-07-12] Added --namespace option to all commands with global support
+- [2025-07-12] Added --show-yaml option for run and secret commands
+- [2025-07-12] Added --as-deployment option for run command to create Deployments instead of Jobs
+- [2025-07-12] Fixed job name generation to preserve original directory context via K8R_ORIGINAL_PWD env var
+- [2025-07-12] Added --job-name support to secret command
+- [2025-07-12] Updated shell function in print_env_setup() to preserve original working directory
+- [2025-07-12] Updated README.md with new command structure, examples, and feature documentation
+- [2025-07-12] All tasks completed successfully - refactoring provides much clearer help output and better UX
+- [2025-07-12] Added 'update' command for self-updating k8r installations with branch switching support
+
+### Key Implementation Details
+
+1. **Subcommand Structure**: Used argparse subparsers to organize commands (run, ls, logs, rm, secret, update, env)
+2. **Backward Compatibility**: Maintained compatibility by automatically inserting "run" when first arg is not a known subcommand
+3. **Directory Context Fix**: Modified shell function to pass K8R_ORIGINAL_PWD environment variable
+4. **New Methods Added**:
+   - `create_secret_with_options()` - supports --job-name and --show-yaml
+   - `run_job_with_options()` - main entry point for run command
+   - `create_job_with_yaml_option()` - job creation with YAML output support
+   - `create_deployment()` - deployment creation instead of jobs
+   - `update_k8r()` - self-updating functionality with git operations
+5. **Global Options**: --namespace can be specified at the top level and applies to all commands
 
 ---
 
