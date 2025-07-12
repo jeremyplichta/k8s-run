@@ -220,7 +220,8 @@ k8r [run] SOURCE [OPTIONS] -- COMMAND [ARGS...]
 | `k8r ls` | 📋 List all k8r jobs | `k8r ls` |
 | `k8r logs <job-name>` | 📄 View job logs | `k8r logs my-job` |
 | `k8r logs <job-name> -f` | 📺 Follow logs in real-time | `k8r logs my-job -f` |
-| `k8r rm <job-name>` | 🗑️ Delete a job | `k8r rm my-job` |
+| `k8r rm <job-name>` | 🗑️ Delete a job (preserves secrets) | `k8r rm my-job` |
+| `k8r rm <job-name> --rm-secrets` | 🗑️ Delete job and associated secrets | `k8r rm my-job --rm-secrets` |
 | `k8r rm <job-name> -f` | ⚠️ Force delete (even with running pods) | `k8r rm my-job -f` |
 
 ### 🔐 Secret Management
