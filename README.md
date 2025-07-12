@@ -55,7 +55,10 @@ This will:
 ### 🔄 Update k8r
 
 ```bash
-# Re-run the installer to update to the latest version
+# Use the built-in update command (recommended)
+k8r update
+
+# Or re-run the installer to update to the latest version
 curl -fsSL https://raw.githubusercontent.com/jeremyplichta/k8s-run/main/install.sh | bash
 ```
 

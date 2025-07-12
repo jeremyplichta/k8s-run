@@ -216,9 +216,10 @@ class K8sRun:
             secret_k8s_name = secret_info["name"]
             
             # Add volume for secret files
+            sanitized_volume_name = f"secret-{self.sanitize_k8s_name(secret_name)}"
             secret_volumes.append(
                 client.V1Volume(
-                    name=f"secret-{secret_name}",
+                    name=sanitized_volume_name,
                     secret=client.V1SecretVolumeSource(secret_name=secret_k8s_name)
                 )
             )
@@ -226,7 +227,7 @@ class K8sRun:
             # Add volume mount for secret files
             secret_volume_mounts.append(
                 client.V1VolumeMount(
-                    name=f"secret-{secret_name}",
+                    name=sanitized_volume_name,
                     mount_path=f"/k8r/secret/{secret_name}",
                     read_only=True
                 )
@@ -887,16 +888,17 @@ fi
                 secret_name = secret_info["secret_name"]
                 secret_k8s_name = secret_info["name"]
                 
+                sanitized_volume_name = f"secret-{self.sanitize_k8s_name(secret_name)}"
                 secret_volumes.append(
                     client.V1Volume(
-                        name=f"secret-{secret_name}",
+                        name=sanitized_volume_name,
                         secret=client.V1SecretVolumeSource(secret_name=secret_k8s_name)
                     )
                 )
                 
                 secret_volume_mounts.append(
                     client.V1VolumeMount(
-                        name=f"secret-{secret_name}",
+                        name=sanitized_volume_name,
                         mount_path=f"/k8r/secret/{secret_name}",
                         read_only=True
                     )
@@ -1018,16 +1020,17 @@ fi
                 secret_name = secret_info["secret_name"]
                 secret_k8s_name = secret_info["name"]
                 
+                sanitized_volume_name = f"secret-{self.sanitize_k8s_name(secret_name)}"
                 secret_volumes.append(
                     client.V1Volume(
-                        name=f"secret-{secret_name}",
+                        name=sanitized_volume_name,
                         secret=client.V1SecretVolumeSource(secret_name=secret_k8s_name)
                     )
                 )
                 
                 secret_volume_mounts.append(
                     client.V1VolumeMount(
-                        name=f"secret-{secret_name}",
+                        name=sanitized_volume_name,
                         mount_path=f"/k8r/secret/{secret_name}",
                         read_only=True
                     )
