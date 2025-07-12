@@ -71,7 +71,7 @@ echo "🔧 Setting up shell integration..."
 if ! grep -q "k8r()" "$SHELL_RC" 2>/dev/null; then
     echo "" >> "$SHELL_RC"
     echo "# k8s-run (k8r) - Added by installer" >> "$SHELL_RC"
-    python k8r.py env >> "$SHELL_RC"
+    python3 k8r.py env >> "$SHELL_RC"
     echo "✅ Shell integration added to $SHELL_RC"
 else
     echo "ℹ️  Shell integration already exists in $SHELL_RC"
