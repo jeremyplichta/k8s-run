@@ -288,9 +288,12 @@ class K8sRun:
             )
         )
         
-        # Set backoff limit if retry is specified
+        # Set backoff limit: 0 for Never restart policy, retry_limit for OnFailure
         if retry_limit is not None:
             job_spec.backoff_limit = retry_limit
+        else:
+            # Set backoff_limit to 0 when restart_policy is Never to prevent new pod creation on failure
+            job_spec.backoff_limit = 0
             
         # Create job with k8r labels
         job = client.V1Job(
@@ -1102,9 +1105,12 @@ fi
             )
         )
         
-        # Set backoff limit if retry is specified
+        # Set backoff limit: 0 for Never restart policy, retry_limit for OnFailure
         if retry_limit is not None:
             job_spec.backoff_limit = retry_limit
+        else:
+            # Set backoff_limit to 0 when restart_policy is Never to prevent new pod creation on failure
+            job_spec.backoff_limit = 0
             
         # Create job with k8r labels
         job = client.V1Job(
