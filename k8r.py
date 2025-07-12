@@ -174,7 +174,7 @@ class K8sRun:
 
     def create_job(self, source: str, command: List[str], num_instances: int = 1, 
                    timeout: str = "1h", base_image: str = "alpine:latest", 
-                   job_name: Optional[str] = None) -> str:
+                   job_name: Optional[str] = None, retry_limit: Optional[int] = None) -> str:
         """Create a Kubernetes job"""
         
         source_type = self.detect_source_type(source)
@@ -265,6 +265,33 @@ class K8sRun:
         if job_secrets:
             print(f"Mounting {len(job_secrets)} secrets for job '{final_job_name}'")
         
+        # Determine restart policy and backoff limit
+        restart_policy = "OnFailure" if retry_limit is not None else "Never"
+        
+        # Create job spec with conditional backoff limit
+        job_spec = client.V1JobSpec(
+            parallelism=num_instances,
+            completions=num_instances,
+            active_deadline_seconds=timeout_seconds,
+            template=client.V1PodTemplateSpec(
+                metadata=client.V1ObjectMeta(
+                    labels={
+                        "created-by": "k8r",
+                        "k8r-job": final_job_name
+                    }
+                ),
+                spec=client.V1PodSpec(
+                    containers=[container],
+                    volumes=volumes,
+                    restart_policy=restart_policy
+                )
+            )
+        )
+        
+        # Set backoff limit if retry is specified
+        if retry_limit is not None:
+            job_spec.backoff_limit = retry_limit
+            
         # Create job with k8r labels
         job = client.V1Job(
             metadata=client.V1ObjectMeta(
@@ -274,24 +301,7 @@ class K8sRun:
                     "k8r-source-type": source_type
                 }
             ),
-            spec=client.V1JobSpec(
-                parallelism=num_instances,
-                completions=num_instances,
-                active_deadline_seconds=timeout_seconds,
-                template=client.V1PodTemplateSpec(
-                    metadata=client.V1ObjectMeta(
-                        labels={
-                            "created-by": "k8r",
-                            "k8r-job": final_job_name
-                        }
-                    ),
-                    spec=client.V1PodSpec(
-                        containers=[container],
-                        volumes=volumes,
-                        restart_policy="Never"
-                    )
-                )
-            )
+            spec=job_spec
         )
         
         self.batch_v1.create_namespaced_job(namespace=self.namespace, body=job)
@@ -831,7 +841,7 @@ fi
     def run_job_with_options(self, source: str, command: List[str], num_instances: int = 1, 
                            timeout: str = "1h", base_image: str = "alpine:latest", 
                            job_name: Optional[str] = None, detach: bool = False,
-                           show_yaml: bool = False, as_deployment: bool = False) -> None:
+                           show_yaml: bool = False, as_deployment: bool = False, retry_limit: Optional[int] = None) -> None:
         """Create and run a job with additional options"""
         
         if as_deployment:
@@ -846,14 +856,14 @@ fi
             job_name = self.create_job_with_yaml_option(
                 source=source, command=command, num_instances=num_instances,
                 timeout=timeout, base_image=base_image, job_name=job_name,
-                show_yaml=show_yaml
+                show_yaml=show_yaml, retry_limit=retry_limit
             )
             if not show_yaml:
                 self.monitor_job(job_name, detach)
     
     def create_job_with_yaml_option(self, source: str, command: List[str], num_instances: int = 1, 
                                   timeout: str = "1h", base_image: str = "alpine:latest", 
-                                  job_name: Optional[str] = None, show_yaml: bool = False) -> str:
+                                  job_name: Optional[str] = None, show_yaml: bool = False, retry_limit: Optional[int] = None) -> str:
         """Create a job with option to output YAML instead of applying"""
         
         source_type = self.detect_source_type(source)
@@ -945,6 +955,33 @@ fi
             if job_secrets:
                 print(f"Mounting {len(job_secrets)} secrets for job '{final_job_name}'")
         
+        # Determine restart policy and backoff limit
+        restart_policy = "OnFailure" if retry_limit is not None else "Never"
+        
+        # Create job spec with conditional backoff limit
+        job_spec = client.V1JobSpec(
+            parallelism=num_instances,
+            completions=num_instances,
+            active_deadline_seconds=timeout_seconds,
+            template=client.V1PodTemplateSpec(
+                metadata=client.V1ObjectMeta(
+                    labels={
+                        "created-by": "k8r",
+                        "k8r-job": final_job_name
+                    }
+                ),
+                spec=client.V1PodSpec(
+                    containers=[container],
+                    volumes=volumes,
+                    restart_policy=restart_policy
+                )
+            )
+        )
+        
+        # Set backoff limit if retry is specified
+        if retry_limit is not None:
+            job_spec.backoff_limit = retry_limit
+            
         # Create job with k8r labels
         job = client.V1Job(
             metadata=client.V1ObjectMeta(
@@ -954,24 +991,7 @@ fi
                     "k8r-source-type": source_type
                 }
             ),
-            spec=client.V1JobSpec(
-                parallelism=num_instances,
-                completions=num_instances,
-                active_deadline_seconds=timeout_seconds,
-                template=client.V1PodTemplateSpec(
-                    metadata=client.V1ObjectMeta(
-                        labels={
-                            "created-by": "k8r",
-                            "k8r-job": final_job_name
-                        }
-                    ),
-                    spec=client.V1PodSpec(
-                        containers=[container],
-                        volumes=volumes,
-                        restart_policy="Never"
-                    )
-                )
-            )
+            spec=job_spec
         )
         
         if show_yaml:
@@ -1312,6 +1332,7 @@ Examples:
     run_parser.add_argument("-d", "--detach", action="store_true", help="Run in background")
     run_parser.add_argument("--show-yaml", action="store_true", help="Print YAML to stdout instead of applying")
     run_parser.add_argument("--as-deployment", action="store_true", help="Create as Deployment instead of Job")
+    run_parser.add_argument("--retry", type=int, metavar="N", help="Set restart policy to OnFailure with backoff limit N (default: Never)")
     
     # List command
     ls_parser = subparsers.add_parser("ls", help="List k8r jobs")
@@ -1398,7 +1419,8 @@ Examples:
             job_name=args.job_name,
             detach=args.detach,
             show_yaml=args.show_yaml,
-            as_deployment=args.as_deployment
+            as_deployment=args.as_deployment,
+            retry_limit=args.retry
         )
     else:
         parser.print_help()

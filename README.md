@@ -212,6 +212,7 @@ k8r [run] SOURCE [OPTIONS] -- COMMAND [ARGS...]
 | `-d, --detach` | Run in background without monitoring | disabled | `-d` |
 | `--show-yaml` | Print YAML to stdout instead of applying | disabled | `--show-yaml` |
 | `--as-deployment` | Create as Deployment instead of Job | disabled | `--as-deployment` |
+| `--retry N` | Set restart policy to OnFailure with backoff limit N | Never restart | `--retry 3` |
 
 ### 🛠️ Management Commands
 
@@ -272,6 +273,27 @@ redis-test   | container  | 1       | 0       | 1        | 0
 ```
 
 ## ⚙️ Advanced Usage
+
+### 🔁 Job Restart Policies
+
+k8r jobs use different restart policies depending on the `--retry` flag:
+
+| Configuration | Restart Policy | Behavior | Use Case |
+|---------------|----------------|----------|----------|
+| Default (no `--retry`) | `Never` | Job pods don't restart on failure | One-shot tasks, data processing |
+| `--retry N` | `OnFailure` | Job retries failed pods up to N times | Tasks that may fail temporarily |
+
+**Examples:**
+```bash
+# Default: Never restart on failure
+k8r ./ -- python critical_task.py
+
+# Retry up to 3 times on failure
+k8r ./ --retry 3 -- python flaky_network_task.py
+
+# Retry up to 5 times for unreliable operations
+k8r ./ --retry 5 -- curl https://unreliable-api.com/data
+```
 
 ### 🌍 Environment Variables
 
