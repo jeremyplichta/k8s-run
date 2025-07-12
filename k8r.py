@@ -631,10 +631,32 @@ fi
             print(f"Warning: Error listing secrets for job {job_name}: {e}")
             return []
 
+    def sanitize_k8s_name(self, name: str) -> str:
+        """Sanitize a name to be compliant with Kubernetes RFC 1123 subdomain rules"""
+        # Convert to lowercase
+        name = name.lower()
+        
+        # Replace invalid characters with hyphens
+        name = re.sub(r'[^a-z0-9.-]', '-', name)
+        
+        # Ensure it starts and ends with alphanumeric character
+        name = re.sub(r'^[^a-z0-9]+', '', name)
+        name = re.sub(r'[^a-z0-9]+$', '', name)
+        
+        # Collapse multiple consecutive hyphens/dots
+        name = re.sub(r'[-\.]+', '-', name)
+        
+        # Ensure it's not empty and doesn't exceed length limits
+        if not name:
+            name = 'unnamed'
+        
+        return name
+
     def create_secret(self, secret_name: str, secret_value: str) -> None:
         """Create a Kubernetes secret with k8r labels"""
         job_name = self.get_job_name_from_directory()
-        full_secret_name = f"{job_name}-{secret_name}"
+        sanitized_secret_name = self.sanitize_k8s_name(secret_name)
+        full_secret_name = f"{job_name}-{sanitized_secret_name}"
         
         # Prepare secret data
         secret_data = {}
