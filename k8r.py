@@ -235,7 +235,7 @@ class K8sRun:
             
             # Add environment variables for each key in the secret
             for key in secret_info["data_keys"]:
-                env_var_name = f"{secret_name.upper()}_{key.upper()}".replace("-", "_").replace(".", "_")
+                env_var_name = key.upper().replace("-", "_").replace(".", "_")
                 secret_env_vars.append(
                     client.V1EnvVar(
                         name=env_var_name,
@@ -917,7 +917,7 @@ fi
                 )
                 
                 for key in secret_info["data_keys"]:
-                    env_var_name = f"{secret_name.upper()}_{key.upper()}".replace("-", "_").replace(".", "_")
+                    env_var_name = key.upper().replace("-", "_").replace(".", "_")
                     secret_env_vars.append(
                         client.V1EnvVar(
                             name=env_var_name,
@@ -1049,7 +1049,7 @@ fi
                 )
                 
                 for key in secret_info["data_keys"]:
-                    env_var_name = f"{secret_name.upper()}_{key.upper()}".replace("-", "_").replace(".", "_")
+                    env_var_name = key.upper().replace("-", "_").replace(".", "_")
                     secret_env_vars.append(
                         client.V1EnvVar(
                             name=env_var_name,
