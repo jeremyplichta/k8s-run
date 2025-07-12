@@ -86,8 +86,8 @@ class K8sRun:
         else:
             raise ValueError(f"Could not determine source type for: {source}")
 
-    def generate_job_name(self, source: str, job_name: Optional[str] = None) -> str:
-        """Generate a unique job name"""
+    def generate_job_name(self, source: str, job_name: Optional[str] = None, allow_existing: bool = False) -> str:
+        """Generate a job name"""
         if job_name:
             base_name = job_name
         elif source == "." or source == "./":
@@ -104,14 +104,11 @@ class K8sRun:
         else:
             base_name = re.sub(r'[^a-z0-9-]', '-', source.lower())
 
-        base_name = re.sub(r'[^a-z0-9-]', '-', base_name.lower()).strip('-')
+        final_name = re.sub(r'[^a-z0-9-]', '-', base_name.lower()).strip('-')
         
-        # Check if job exists and increment if needed
-        counter = 0
-        final_name = base_name
-        while self.job_exists(final_name):
-            counter += 1
-            final_name = f"{base_name}-{counter}"
+        # Check if job exists and error if not allowed
+        if self.job_exists(final_name) and not allow_existing:
+            raise ValueError(f"Job '{final_name}' already exists. Run again with --rm to remove that job first.")
         
         return final_name
 
@@ -944,8 +941,17 @@ fi
     def run_job_with_options(self, source: str, command: List[str], num_instances: int = 1, 
                            timeout: str = "1h", base_image: str = "alpine:latest", 
                            job_name: Optional[str] = None, detach: bool = False,
-                           show_yaml: bool = False, as_deployment: bool = False, retry_limit: Optional[int] = None, follow: bool = False) -> None:
+                           show_yaml: bool = False, as_deployment: bool = False, retry_limit: Optional[int] = None, follow: bool = False, rm_existing: bool = False) -> None:
         """Create and run a job with additional options"""
+        
+        # Handle --rm flag: delete existing job if it exists
+        if rm_existing and not show_yaml:
+            # Generate the job name to check if it exists
+            source_type = self.detect_source_type(source)
+            temp_job_name = self.generate_job_name(source, job_name, allow_existing=True)
+            if self.job_exists(temp_job_name):
+                print(f"Deleting existing job '{temp_job_name}'...")
+                self.delete_job(temp_job_name, force=True, rm_secrets=False)
         
         if as_deployment:
             job_name = self.create_deployment(
@@ -959,7 +965,7 @@ fi
             job_name = self.create_job_with_yaml_option(
                 source=source, command=command, num_instances=num_instances,
                 timeout=timeout, base_image=base_image, job_name=job_name,
-                show_yaml=show_yaml, retry_limit=retry_limit
+                show_yaml=show_yaml, retry_limit=retry_limit, allow_existing=rm_existing
             )
             if not show_yaml:
                 if follow and not detach:
@@ -969,11 +975,11 @@ fi
     
     def create_job_with_yaml_option(self, source: str, command: List[str], num_instances: int = 1, 
                                   timeout: str = "1h", base_image: str = "alpine:latest", 
-                                  job_name: Optional[str] = None, show_yaml: bool = False, retry_limit: Optional[int] = None) -> str:
+                                  job_name: Optional[str] = None, show_yaml: bool = False, retry_limit: Optional[int] = None, allow_existing: bool = False) -> str:
         """Create a job with option to output YAML instead of applying"""
         
         source_type = self.detect_source_type(source)
-        final_job_name = self.generate_job_name(source, job_name)
+        final_job_name = self.generate_job_name(source, job_name, allow_existing)
         
         # Convert timeout to seconds
         timeout_seconds = self.parse_timeout(timeout)
@@ -1455,6 +1461,7 @@ Examples:
     run_parser.add_argument("--as-deployment", action="store_true", help="Create as Deployment instead of Job")
     run_parser.add_argument("--retry", type=int, metavar="N", help="Set restart policy to OnFailure with backoff limit N (default: Never)")
     run_parser.add_argument("-f", "--follow", action="store_true", help="Follow logs after job starts")
+    run_parser.add_argument("--rm", action="store_true", help="Delete existing job with same name before creating new one")
     
     # List command
     ls_parser = subparsers.add_parser("ls", help="List k8r jobs")
@@ -1543,7 +1550,8 @@ Examples:
             show_yaml=args.show_yaml,
             as_deployment=args.as_deployment,
             retry_limit=args.retry,
-            follow=args.follow
+            follow=args.follow,
+            rm_existing=args.rm
         )
     else:
         parser.print_help()

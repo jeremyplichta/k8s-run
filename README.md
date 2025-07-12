@@ -112,6 +112,9 @@ k8r ./ --as-deployment --num 3 -- python web_server.py
 
 # Preview YAML without applying
 k8r ./ --show-yaml -- python process.py
+
+# Delete existing job if it exists and create new one
+k8r ./ --rm -- python process.py
 ```
 
 ### 🐙 Run from GitHub
@@ -203,6 +206,8 @@ Create and run Kubernetes Jobs or Deployments.
 k8r [run] SOURCE [OPTIONS] -- COMMAND [ARGS...]
 ```
 
+> ⚠️ **Job Name Behavior**: k8r will now error if a job with the same name already exists, instead of auto-incrementing the name. Use `--rm` to delete the existing job first, or use a different `--job-name`.
+
 | Option | Description | Default | Example |
 |--------|-------------|---------|---------|
 | `--num N` | Number of parallel job instances | `1` | `--num 8` |
@@ -214,6 +219,7 @@ k8r [run] SOURCE [OPTIONS] -- COMMAND [ARGS...]
 | `--show-yaml` | Print YAML to stdout instead of applying | disabled | `--show-yaml` |
 | `--as-deployment` | Create as Deployment instead of Job | disabled | `--as-deployment` |
 | `--retry N` | Set restart policy to OnFailure with backoff limit N | Never restart | `--retry 3` |
+| `--rm` | Delete existing job with same name before creating new one | disabled | `--rm` |
 
 ### 🛠️ Management Commands
 
