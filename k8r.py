@@ -738,7 +738,8 @@ fi
         
         # Use provided job name or fall back to directory-based name
         effective_job_name = job_name if job_name else original_job_name
-        full_secret_name = f"{effective_job_name}-{secret_name}"
+        sanitized_secret_name = self.sanitize_k8s_name(secret_name)
+        full_secret_name = f"{effective_job_name}-{sanitized_secret_name}"
         
         # Prepare secret data (same logic as original create_secret)
         secret_data = {}
