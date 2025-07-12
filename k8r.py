@@ -224,14 +224,16 @@ class K8sRun:
                 )
             )
             
-            # Add volume mount for secret files
-            secret_volume_mounts.append(
-                client.V1VolumeMount(
-                    name=sanitized_volume_name,
-                    mount_path=f"/k8r/secret/{secret_name}",
-                    read_only=True
+            # Add volume mounts for each secret key to avoid duplication
+            for key in secret_info["data_keys"]:
+                secret_volume_mounts.append(
+                    client.V1VolumeMount(
+                        name=sanitized_volume_name,
+                        mount_path=f"/k8r/secrets/{key}",
+                        sub_path=key,
+                        read_only=True
+                    )
                 )
-            )
             
             # Add environment variables for each key in the secret
             for key in secret_info["data_keys"]:
@@ -917,8 +919,17 @@ fi
         secret_volume_mounts = []
         secret_env_vars = []
         
-        if not show_yaml:
-            job_secrets = self.get_job_secrets(final_job_name)
+        # Get job secrets (even in show_yaml mode to demonstrate mounting)
+        job_secrets = self.get_job_secrets(final_job_name) if not show_yaml else []
+        
+        # For show_yaml mode, try to get secrets anyway for demonstration
+        if show_yaml and not job_secrets:
+            try:
+                job_secrets = self.get_job_secrets(final_job_name)
+            except:
+                pass  # Ignore errors in show_yaml mode
+        
+        if job_secrets:
             for secret_info in job_secrets:
                 secret_name = secret_info["secret_name"]
                 secret_k8s_name = secret_info["name"]
@@ -931,13 +942,16 @@ fi
                     )
                 )
                 
-                secret_volume_mounts.append(
-                    client.V1VolumeMount(
-                        name=sanitized_volume_name,
-                        mount_path=f"/k8r/secret/{secret_name}",
-                        read_only=True
+                # Add volume mounts for each secret key to avoid duplication
+                for key in secret_info["data_keys"]:
+                    secret_volume_mounts.append(
+                        client.V1VolumeMount(
+                            name=sanitized_volume_name,
+                            mount_path=f"/k8r/secrets/{key}",
+                            sub_path=key,
+                            read_only=True
+                        )
                     )
-                )
                 
                 for key in secret_info["data_keys"]:
                     env_var_name = key.upper().replace("-", "_").replace(".", "_")
@@ -1073,13 +1087,16 @@ fi
                     )
                 )
                 
-                secret_volume_mounts.append(
-                    client.V1VolumeMount(
-                        name=sanitized_volume_name,
-                        mount_path=f"/k8r/secret/{secret_name}",
-                        read_only=True
+                # Add volume mounts for each secret key to avoid duplication
+                for key in secret_info["data_keys"]:
+                    secret_volume_mounts.append(
+                        client.V1VolumeMount(
+                            name=sanitized_volume_name,
+                            mount_path=f"/k8r/secrets/{key}",
+                            sub_path=key,
+                            read_only=True
+                        )
                     )
-                )
                 
                 for key in secret_info["data_keys"]:
                     env_var_name = key.upper().replace("-", "_").replace(".", "_")
