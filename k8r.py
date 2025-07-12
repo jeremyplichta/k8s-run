@@ -320,8 +320,8 @@ if [ -f k8s-startup.sh ]; then
     ./k8s-startup.sh
 fi"""
         
-        # Properly escape and join the command
-        command_str = " ".join(f"'{arg}'" if " " in arg else arg for arg in command)
+        # Join command for shell execution (don't escape to allow variable expansion)
+        command_str = " ".join(command)
         full_script = f"{init_script}\necho 'Running command...'\n{command_str}"
         
         full_command = ["sh", "-c", full_script]
@@ -354,7 +354,9 @@ if [ -f k8s-startup.sh ]; then
 fi
 """
         
-        full_command = ["sh", "-c", init_script + " && " + " ".join(command)]
+        # Join command for shell execution (don't escape to allow variable expansion)  
+        command_str = " ".join(command)
+        full_command = ["sh", "-c", init_script + " && " + command_str]
         
         return client.V1Container(
             name="runner",
@@ -365,10 +367,17 @@ fi
 
     def create_container_container(self, image: str, command: List[str]):
         """Create container spec for container mode"""
+        if command:
+            # Join command args and wrap in shell for proper variable expansion
+            command_str = " ".join(command)
+            shell_command = ["/bin/sh", "-c", command_str]
+        else:
+            shell_command = None
+            
         return client.V1Container(
             name="runner",
             image=image,
-            command=command if command else None
+            command=shell_command
         )
 
     def build_and_push_dockerfile(self, dockerfile_path: str, job_name: str) -> str:
