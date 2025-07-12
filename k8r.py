@@ -526,19 +526,21 @@ fi
                 
                 try:
                     if follow:
-                        # For follow mode, we'd need to implement streaming
-                        logs = self.core_v1.read_namespaced_pod_log(
+                        # Stream logs in follow mode
+                        logs_stream = self.core_v1.read_namespaced_pod_log(
                             name=pod_name,
                             namespace=self.namespace,
-                            follow=False
+                            follow=True,
+                            _preload_content=False
                         )
+                        for line in logs_stream:
+                            print(line.decode('utf-8'), end='')
                     else:
                         logs = self.core_v1.read_namespaced_pod_log(
                             name=pod_name,
                             namespace=self.namespace
                         )
-                    
-                    print(logs)
+                        print(logs)
                     
                 except Exception as e:
                     print(f"Error getting logs for pod {pod_name}: {e}")
@@ -850,7 +852,7 @@ fi
     def run_job_with_options(self, source: str, command: List[str], num_instances: int = 1, 
                            timeout: str = "1h", base_image: str = "alpine:latest", 
                            job_name: Optional[str] = None, detach: bool = False,
-                           show_yaml: bool = False, as_deployment: bool = False, retry_limit: Optional[int] = None) -> None:
+                           show_yaml: bool = False, as_deployment: bool = False, retry_limit: Optional[int] = None, follow: bool = False) -> None:
         """Create and run a job with additional options"""
         
         if as_deployment:
@@ -869,6 +871,8 @@ fi
             )
             if not show_yaml:
                 self.monitor_job(job_name, detach)
+                if follow and not detach:
+                    self.get_job_logs(job_name, follow=True)
     
     def create_job_with_yaml_option(self, source: str, command: List[str], num_instances: int = 1, 
                                   timeout: str = "1h", base_image: str = "alpine:latest", 
@@ -1342,6 +1346,7 @@ Examples:
     run_parser.add_argument("--show-yaml", action="store_true", help="Print YAML to stdout instead of applying")
     run_parser.add_argument("--as-deployment", action="store_true", help="Create as Deployment instead of Job")
     run_parser.add_argument("--retry", type=int, metavar="N", help="Set restart policy to OnFailure with backoff limit N (default: Never)")
+    run_parser.add_argument("-f", "--follow", action="store_true", help="Follow logs after job starts")
     
     # List command
     ls_parser = subparsers.add_parser("ls", help="List k8r jobs")
@@ -1429,7 +1434,8 @@ Examples:
             detach=args.detach,
             show_yaml=args.show_yaml,
             as_deployment=args.as_deployment,
-            retry_limit=args.retry
+            retry_limit=args.retry,
+            follow=args.follow
         )
     else:
         parser.print_help()

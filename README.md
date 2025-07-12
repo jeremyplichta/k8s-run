@@ -210,6 +210,7 @@ k8r [run] SOURCE [OPTIONS] -- COMMAND [ARGS...]
 | `--base-image IMAGE` | Base container for directory/GitHub mode | `alpine:latest` | `--base-image python:3.9` |
 | `--job-name NAME` | Custom job name | auto-generated | `--job-name my-job` |
 | `-d, --detach` | Run in background without monitoring | disabled | `-d` |
+| `-f, --follow` | Follow logs after job starts | disabled | `-f` |
 | `--show-yaml` | Print YAML to stdout instead of applying | disabled | `--show-yaml` |
 | `--as-deployment` | Create as Deployment instead of Job | disabled | `--as-deployment` |
 | `--retry N` | Set restart policy to OnFailure with backoff limit N | Never restart | `--retry 3` |
