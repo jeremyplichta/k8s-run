@@ -527,7 +527,7 @@ fi
         except Exception as e:
             print(f"Error getting job logs: {e}")
 
-    def delete_job(self, job_name: str, force: bool = False) -> None:
+    def delete_job(self, job_name: str, force: bool = False, rm_secrets: bool = False) -> None:
         """Delete a k8r job"""
         try:
             # Check if this is a k8r job
@@ -570,8 +570,20 @@ fi
                 if e.status != 404:
                     print(f"Warning: Could not delete configmap: {e}")
             
-            # Delete associated secrets
-            self.delete_job_secrets(job_name)
+            # Delete associated secrets only if --rm-secrets flag is passed
+            if rm_secrets:
+                self.delete_job_secrets(job_name)
+            else:
+                # Count secrets for informational message
+                try:
+                    secrets = self.core_v1.list_namespaced_secret(
+                        namespace=self.namespace,
+                        label_selector=f"created-by=k8r,k8r-job={job_name}"
+                    )
+                    if secrets.items:
+                        print(f"Note: {len(secrets.items)} associated secrets preserved. Use --rm-secrets to remove them.")
+                except Exception:
+                    pass  # Silently ignore secret listing errors
             
             print(f"Job '{job_name}' deleted")
             
@@ -1313,6 +1325,7 @@ Examples:
     rm_parser = subparsers.add_parser("rm", help="Delete a job")
     rm_parser.add_argument("job_name", help="Job name")
     rm_parser.add_argument("-f", "--force", action="store_true", help="Force delete")
+    rm_parser.add_argument("--rm-secrets", action="store_true", help="Also remove associated secrets")
     
     # Secret command
     secret_parser = subparsers.add_parser("secret", help="Manage secrets")
@@ -1369,7 +1382,7 @@ Examples:
     elif args.command == "logs":
         k8r.get_job_logs(args.job_name, args.follow)
     elif args.command == "rm":
-        k8r.delete_job(args.job_name, args.force)
+        k8r.delete_job(args.job_name, args.force, args.rm_secrets)
     elif args.command == "secret":
         k8r.create_secret_with_options(args.secret_name, args.secret_value, 
                                      job_name=args.job_name, show_yaml=args.show_yaml)
