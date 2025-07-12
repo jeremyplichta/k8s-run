@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.parse
 from pathlib import Path
@@ -473,6 +474,95 @@ fi
                 print(f"Error monitoring job: {e}")
                 break
 
+    def monitor_job_with_logs(self, job_name: str) -> None:
+        """Monitor job progress while continuously tailing logs from all pods"""
+        print(f"Monitoring job '{job_name}' with real-time logs...")
+        
+        # Keep track of pods we're already following
+        followed_pods = set()
+        log_threads = {}
+        stop_event = threading.Event()
+        
+        def follow_pod_logs(pod_name: str):
+            """Follow logs for a specific pod in a separate thread"""
+            try:
+                print(f"\n=== Starting log stream for pod {pod_name} ===")
+                logs_stream = self.core_v1.read_namespaced_pod_log(
+                    name=pod_name,
+                    namespace=self.namespace,
+                    follow=True,
+                    _preload_content=False
+                )
+                for line in logs_stream:
+                    if stop_event.is_set():
+                        break
+                    try:
+                        decoded_line = line.decode('utf-8')
+                        print(f"[{pod_name}] {decoded_line}", end='')
+                    except UnicodeDecodeError:
+                        # Handle binary data gracefully
+                        print(f"[{pod_name}] <binary data>")
+            except Exception as e:
+                if not stop_event.is_set():
+                    print(f"[{pod_name}] Log stream ended: {e}")
+        
+        try:
+            while True:
+                # Check job status
+                try:
+                    job = self.batch_v1.read_namespaced_job(name=job_name, namespace=self.namespace)
+                    status = job.status
+                    
+                    active = status.active or 0
+                    succeeded = status.succeeded or 0
+                    failed = status.failed or 0
+                    
+                    print(f"Job Status: Active={active}, Succeeded={succeeded}, Failed={failed}")
+                    
+                    # Check for new pods and start following their logs
+                    pods = self.core_v1.list_namespaced_pod(
+                        namespace=self.namespace,
+                        label_selector=f"k8r-job={job_name},created-by=k8r"
+                    )
+                    
+                    for pod in pods.items:
+                        pod_name = pod.metadata.name
+                        if pod_name not in followed_pods:
+                            # Check if pod is running or has logs available
+                            pod_status = pod.status.phase
+                            if pod_status in ['Running', 'Succeeded', 'Failed']:
+                                followed_pods.add(pod_name)
+                                thread = threading.Thread(
+                                    target=follow_pod_logs, 
+                                    args=(pod_name,),
+                                    daemon=True
+                                )
+                                thread.start()
+                                log_threads[pod_name] = thread
+                    
+                    # Check if job is complete
+                    if status.completion_time:
+                        print(f"\nJob completed successfully at {status.completion_time}")
+                        break
+                    elif status.failed and status.failed > 0:
+                        print(f"\nJob failed with {status.failed} failures")
+                        break
+                    
+                    time.sleep(2)  # Check more frequently for new pods
+                    
+                except Exception as e:
+                    print(f"Error monitoring job: {e}")
+                    break
+                    
+        except KeyboardInterrupt:
+            print("\n\nMonitoring stopped by user")
+        finally:
+            # Stop all log threads
+            stop_event.set()
+            print("\nWaiting for log streams to finish...")
+            # Give threads a moment to finish gracefully
+            time.sleep(1)
+
     def list_jobs(self) -> None:
         """List current k8r jobs"""
         try:
@@ -872,9 +962,10 @@ fi
                 show_yaml=show_yaml, retry_limit=retry_limit
             )
             if not show_yaml:
-                self.monitor_job(job_name, detach)
                 if follow and not detach:
-                    self.get_job_logs(job_name, follow=True)
+                    self.monitor_job_with_logs(job_name)
+                else:
+                    self.monitor_job(job_name, detach)
     
     def create_job_with_yaml_option(self, source: str, command: List[str], num_instances: int = 1, 
                                   timeout: str = "1h", base_image: str = "alpine:latest", 
