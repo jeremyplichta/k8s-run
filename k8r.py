@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.parse
 from pathlib import Path
@@ -85,8 +86,8 @@ class K8sRun:
         else:
             raise ValueError(f"Could not determine source type for: {source}")
 
-    def generate_job_name(self, source: str, job_name: Optional[str] = None) -> str:
-        """Generate a unique job name"""
+    def generate_job_name(self, source: str, job_name: Optional[str] = None, allow_existing: bool = False) -> str:
+        """Generate a job name"""
         if job_name:
             base_name = job_name
         elif source == "." or source == "./":
@@ -103,14 +104,11 @@ class K8sRun:
         else:
             base_name = re.sub(r'[^a-z0-9-]', '-', source.lower())
 
-        base_name = re.sub(r'[^a-z0-9-]', '-', base_name.lower()).strip('-')
+        final_name = re.sub(r'[^a-z0-9-]', '-', base_name.lower()).strip('-')
         
-        # Check if job exists and increment if needed
-        counter = 0
-        final_name = base_name
-        while self.job_exists(final_name):
-            counter += 1
-            final_name = f"{base_name}-{counter}"
+        # Check if job exists and error if not allowed
+        if self.job_exists(final_name) and not allow_existing:
+            raise ValueError(f"Job '{final_name}' already exists. Run again with --rm to remove that job first.")
         
         return final_name
 
@@ -174,7 +172,7 @@ class K8sRun:
 
     def create_job(self, source: str, command: List[str], num_instances: int = 1, 
                    timeout: str = "1h", base_image: str = "alpine:latest", 
-                   job_name: Optional[str] = None) -> str:
+                   job_name: Optional[str] = None, retry_limit: Optional[int] = None) -> str:
         """Create a Kubernetes job"""
         
         source_type = self.detect_source_type(source)
@@ -224,18 +222,20 @@ class K8sRun:
                 )
             )
             
-            # Add volume mount for secret files
-            secret_volume_mounts.append(
-                client.V1VolumeMount(
-                    name=sanitized_volume_name,
-                    mount_path=f"/k8r/secret/{secret_name}",
-                    read_only=True
+            # Add volume mounts for each secret key to avoid duplication
+            for key in secret_info["data_keys"]:
+                secret_volume_mounts.append(
+                    client.V1VolumeMount(
+                        name=sanitized_volume_name,
+                        mount_path=f"/k8r/secrets/{key}",
+                        sub_path=key,
+                        read_only=True
+                    )
                 )
-            )
             
             # Add environment variables for each key in the secret
             for key in secret_info["data_keys"]:
-                env_var_name = f"{secret_name.upper()}_{key.upper()}".replace("-", "_").replace(".", "_")
+                env_var_name = key.upper().replace("-", "_").replace(".", "_")
                 secret_env_vars.append(
                     client.V1EnvVar(
                         name=env_var_name,
@@ -265,6 +265,36 @@ class K8sRun:
         if job_secrets:
             print(f"Mounting {len(job_secrets)} secrets for job '{final_job_name}'")
         
+        # Determine restart policy and backoff limit
+        restart_policy = "OnFailure" if retry_limit is not None else "Never"
+        
+        # Create job spec with conditional backoff limit
+        job_spec = client.V1JobSpec(
+            parallelism=num_instances,
+            completions=num_instances,
+            active_deadline_seconds=timeout_seconds,
+            template=client.V1PodTemplateSpec(
+                metadata=client.V1ObjectMeta(
+                    labels={
+                        "created-by": "k8r",
+                        "k8r-job": final_job_name
+                    }
+                ),
+                spec=client.V1PodSpec(
+                    containers=[container],
+                    volumes=volumes,
+                    restart_policy=restart_policy
+                )
+            )
+        )
+        
+        # Set backoff limit: 0 for Never restart policy, retry_limit for OnFailure
+        if retry_limit is not None:
+            job_spec.backoff_limit = retry_limit
+        else:
+            # Set backoff_limit to 0 when restart_policy is Never to prevent new pod creation on failure
+            job_spec.backoff_limit = 0
+            
         # Create job with k8r labels
         job = client.V1Job(
             metadata=client.V1ObjectMeta(
@@ -274,24 +304,7 @@ class K8sRun:
                     "k8r-source-type": source_type
                 }
             ),
-            spec=client.V1JobSpec(
-                parallelism=num_instances,
-                completions=num_instances,
-                active_deadline_seconds=timeout_seconds,
-                template=client.V1PodTemplateSpec(
-                    metadata=client.V1ObjectMeta(
-                        labels={
-                            "created-by": "k8r",
-                            "k8r-job": final_job_name
-                        }
-                    ),
-                    spec=client.V1PodSpec(
-                        containers=[container],
-                        volumes=volumes,
-                        restart_policy="Never"
-                    )
-                )
-            )
+            spec=job_spec
         )
         
         self.batch_v1.create_namespaced_job(namespace=self.namespace, body=job)
@@ -310,8 +323,8 @@ if [ -f k8s-startup.sh ]; then
     ./k8s-startup.sh
 fi"""
         
-        # Properly escape and join the command
-        command_str = " ".join(f"'{arg}'" if " " in arg else arg for arg in command)
+        # Join command for shell execution (don't escape to allow variable expansion)
+        command_str = " ".join(command)
         full_script = f"{init_script}\necho 'Running command...'\n{command_str}"
         
         full_command = ["sh", "-c", full_script]
@@ -344,7 +357,9 @@ if [ -f k8s-startup.sh ]; then
 fi
 """
         
-        full_command = ["sh", "-c", init_script + " && " + " ".join(command)]
+        # Join command for shell execution (don't escape to allow variable expansion)  
+        command_str = " ".join(command)
+        full_command = ["sh", "-c", init_script + " && " + command_str]
         
         return client.V1Container(
             name="runner",
@@ -355,10 +370,17 @@ fi
 
     def create_container_container(self, image: str, command: List[str]):
         """Create container spec for container mode"""
+        if command:
+            # Join command args and wrap in shell for proper variable expansion
+            command_str = " ".join(command)
+            shell_command = ["/bin/sh", "-c", command_str]
+        else:
+            shell_command = None
+            
         return client.V1Container(
             name="runner",
             image=image,
-            command=command if command else None
+            command=shell_command
         )
 
     def build_and_push_dockerfile(self, dockerfile_path: str, job_name: str) -> str:
@@ -452,6 +474,95 @@ fi
                 print(f"Error monitoring job: {e}")
                 break
 
+    def monitor_job_with_logs(self, job_name: str) -> None:
+        """Monitor job progress while continuously tailing logs from all pods"""
+        print(f"Monitoring job '{job_name}' with real-time logs...")
+        
+        # Keep track of pods we're already following
+        followed_pods = set()
+        log_threads = {}
+        stop_event = threading.Event()
+        
+        def follow_pod_logs(pod_name: str):
+            """Follow logs for a specific pod in a separate thread"""
+            try:
+                print(f"\n=== Starting log stream for pod {pod_name} ===")
+                logs_stream = self.core_v1.read_namespaced_pod_log(
+                    name=pod_name,
+                    namespace=self.namespace,
+                    follow=True,
+                    _preload_content=False
+                )
+                for line in logs_stream:
+                    if stop_event.is_set():
+                        break
+                    try:
+                        decoded_line = line.decode('utf-8')
+                        print(f"[{pod_name}] {decoded_line}", end='')
+                    except UnicodeDecodeError:
+                        # Handle binary data gracefully
+                        print(f"[{pod_name}] <binary data>")
+            except Exception as e:
+                if not stop_event.is_set():
+                    print(f"[{pod_name}] Log stream ended: {e}")
+        
+        try:
+            while True:
+                # Check job status
+                try:
+                    job = self.batch_v1.read_namespaced_job(name=job_name, namespace=self.namespace)
+                    status = job.status
+                    
+                    active = status.active or 0
+                    succeeded = status.succeeded or 0
+                    failed = status.failed or 0
+                    
+                    print(f"Job Status: Active={active}, Succeeded={succeeded}, Failed={failed}")
+                    
+                    # Check for new pods and start following their logs
+                    pods = self.core_v1.list_namespaced_pod(
+                        namespace=self.namespace,
+                        label_selector=f"k8r-job={job_name},created-by=k8r"
+                    )
+                    
+                    for pod in pods.items:
+                        pod_name = pod.metadata.name
+                        if pod_name not in followed_pods:
+                            # Check if pod is running or has logs available
+                            pod_status = pod.status.phase
+                            if pod_status in ['Running', 'Succeeded', 'Failed']:
+                                followed_pods.add(pod_name)
+                                thread = threading.Thread(
+                                    target=follow_pod_logs, 
+                                    args=(pod_name,),
+                                    daemon=True
+                                )
+                                thread.start()
+                                log_threads[pod_name] = thread
+                    
+                    # Check if job is complete
+                    if status.completion_time:
+                        print(f"\nJob completed successfully at {status.completion_time}")
+                        break
+                    elif status.failed and status.failed > 0:
+                        print(f"\nJob failed with {status.failed} failures")
+                        break
+                    
+                    time.sleep(2)  # Check more frequently for new pods
+                    
+                except Exception as e:
+                    print(f"Error monitoring job: {e}")
+                    break
+                    
+        except KeyboardInterrupt:
+            print("\n\nMonitoring stopped by user")
+        finally:
+            # Stop all log threads
+            stop_event.set()
+            print("\nWaiting for log streams to finish...")
+            # Give threads a moment to finish gracefully
+            time.sleep(1)
+
     def list_jobs(self) -> None:
         """List current k8r jobs"""
         try:
@@ -507,19 +618,21 @@ fi
                 
                 try:
                     if follow:
-                        # For follow mode, we'd need to implement streaming
-                        logs = self.core_v1.read_namespaced_pod_log(
+                        # Stream logs in follow mode
+                        logs_stream = self.core_v1.read_namespaced_pod_log(
                             name=pod_name,
                             namespace=self.namespace,
-                            follow=False
+                            follow=True,
+                            _preload_content=False
                         )
+                        for line in logs_stream:
+                            print(line.decode('utf-8'), end='')
                     else:
                         logs = self.core_v1.read_namespaced_pod_log(
                             name=pod_name,
                             namespace=self.namespace
                         )
-                    
-                    print(logs)
+                        print(logs)
                     
                 except Exception as e:
                     print(f"Error getting logs for pod {pod_name}: {e}")
@@ -527,7 +640,7 @@ fi
         except Exception as e:
             print(f"Error getting job logs: {e}")
 
-    def delete_job(self, job_name: str, force: bool = False) -> None:
+    def delete_job(self, job_name: str, force: bool = False, rm_secrets: bool = False) -> None:
         """Delete a k8r job"""
         try:
             # Check if this is a k8r job
@@ -570,8 +683,20 @@ fi
                 if e.status != 404:
                     print(f"Warning: Could not delete configmap: {e}")
             
-            # Delete associated secrets
-            self.delete_job_secrets(job_name)
+            # Delete associated secrets only if --rm-secrets flag is passed
+            if rm_secrets:
+                self.delete_job_secrets(job_name)
+            else:
+                # Count secrets for informational message
+                try:
+                    secrets = self.core_v1.list_namespaced_secret(
+                        namespace=self.namespace,
+                        label_selector=f"created-by=k8r,k8r-job={job_name}"
+                    )
+                    if secrets.items:
+                        print(f"Note: {len(secrets.items)} associated secrets preserved. Use --rm-secrets to remove them.")
+                except Exception:
+                    pass  # Silently ignore secret listing errors
             
             print(f"Job '{job_name}' deleted")
             
@@ -819,8 +944,17 @@ fi
     def run_job_with_options(self, source: str, command: List[str], num_instances: int = 1, 
                            timeout: str = "1h", base_image: str = "alpine:latest", 
                            job_name: Optional[str] = None, detach: bool = False,
-                           show_yaml: bool = False, as_deployment: bool = False) -> None:
+                           show_yaml: bool = False, as_deployment: bool = False, retry_limit: Optional[int] = None, follow: bool = False, rm_existing: bool = False) -> None:
         """Create and run a job with additional options"""
+        
+        # Handle --rm flag: delete existing job if it exists
+        if rm_existing and not show_yaml:
+            # Generate the job name to check if it exists
+            source_type = self.detect_source_type(source)
+            temp_job_name = self.generate_job_name(source, job_name, allow_existing=True)
+            if self.job_exists(temp_job_name):
+                print(f"Deleting existing job '{temp_job_name}'...")
+                self.delete_job(temp_job_name, force=True, rm_secrets=False)
         
         if as_deployment:
             job_name = self.create_deployment(
@@ -834,18 +968,21 @@ fi
             job_name = self.create_job_with_yaml_option(
                 source=source, command=command, num_instances=num_instances,
                 timeout=timeout, base_image=base_image, job_name=job_name,
-                show_yaml=show_yaml
+                show_yaml=show_yaml, retry_limit=retry_limit, allow_existing=rm_existing
             )
             if not show_yaml:
-                self.monitor_job(job_name, detach)
+                if follow and not detach:
+                    self.monitor_job_with_logs(job_name)
+                else:
+                    self.monitor_job(job_name, detach)
     
     def create_job_with_yaml_option(self, source: str, command: List[str], num_instances: int = 1, 
                                   timeout: str = "1h", base_image: str = "alpine:latest", 
-                                  job_name: Optional[str] = None, show_yaml: bool = False) -> str:
+                                  job_name: Optional[str] = None, show_yaml: bool = False, retry_limit: Optional[int] = None, allow_existing: bool = False) -> str:
         """Create a job with option to output YAML instead of applying"""
         
         source_type = self.detect_source_type(source)
-        final_job_name = self.generate_job_name(source, job_name)
+        final_job_name = self.generate_job_name(source, job_name, allow_existing)
         
         # Convert timeout to seconds
         timeout_seconds = self.parse_timeout(timeout)
@@ -882,8 +1019,17 @@ fi
         secret_volume_mounts = []
         secret_env_vars = []
         
-        if not show_yaml:
-            job_secrets = self.get_job_secrets(final_job_name)
+        # Get job secrets (even in show_yaml mode to demonstrate mounting)
+        job_secrets = self.get_job_secrets(final_job_name) if not show_yaml else []
+        
+        # For show_yaml mode, try to get secrets anyway for demonstration
+        if show_yaml and not job_secrets:
+            try:
+                job_secrets = self.get_job_secrets(final_job_name)
+            except:
+                pass  # Ignore errors in show_yaml mode
+        
+        if job_secrets:
             for secret_info in job_secrets:
                 secret_name = secret_info["secret_name"]
                 secret_k8s_name = secret_info["name"]
@@ -896,16 +1042,19 @@ fi
                     )
                 )
                 
-                secret_volume_mounts.append(
-                    client.V1VolumeMount(
-                        name=sanitized_volume_name,
-                        mount_path=f"/k8r/secret/{secret_name}",
-                        read_only=True
+                # Add volume mounts for each secret key to avoid duplication
+                for key in secret_info["data_keys"]:
+                    secret_volume_mounts.append(
+                        client.V1VolumeMount(
+                            name=sanitized_volume_name,
+                            mount_path=f"/k8r/secrets/{key}",
+                            sub_path=key,
+                            read_only=True
+                        )
                     )
-                )
                 
                 for key in secret_info["data_keys"]:
-                    env_var_name = f"{secret_name.upper()}_{key.upper()}".replace("-", "_").replace(".", "_")
+                    env_var_name = key.upper().replace("-", "_").replace(".", "_")
                     secret_env_vars.append(
                         client.V1EnvVar(
                             name=env_var_name,
@@ -933,6 +1082,36 @@ fi
             if job_secrets:
                 print(f"Mounting {len(job_secrets)} secrets for job '{final_job_name}'")
         
+        # Determine restart policy and backoff limit
+        restart_policy = "OnFailure" if retry_limit is not None else "Never"
+        
+        # Create job spec with conditional backoff limit
+        job_spec = client.V1JobSpec(
+            parallelism=num_instances,
+            completions=num_instances,
+            active_deadline_seconds=timeout_seconds,
+            template=client.V1PodTemplateSpec(
+                metadata=client.V1ObjectMeta(
+                    labels={
+                        "created-by": "k8r",
+                        "k8r-job": final_job_name
+                    }
+                ),
+                spec=client.V1PodSpec(
+                    containers=[container],
+                    volumes=volumes,
+                    restart_policy=restart_policy
+                )
+            )
+        )
+        
+        # Set backoff limit: 0 for Never restart policy, retry_limit for OnFailure
+        if retry_limit is not None:
+            job_spec.backoff_limit = retry_limit
+        else:
+            # Set backoff_limit to 0 when restart_policy is Never to prevent new pod creation on failure
+            job_spec.backoff_limit = 0
+            
         # Create job with k8r labels
         job = client.V1Job(
             metadata=client.V1ObjectMeta(
@@ -942,24 +1121,7 @@ fi
                     "k8r-source-type": source_type
                 }
             ),
-            spec=client.V1JobSpec(
-                parallelism=num_instances,
-                completions=num_instances,
-                active_deadline_seconds=timeout_seconds,
-                template=client.V1PodTemplateSpec(
-                    metadata=client.V1ObjectMeta(
-                        labels={
-                            "created-by": "k8r",
-                            "k8r-job": final_job_name
-                        }
-                    ),
-                    spec=client.V1PodSpec(
-                        containers=[container],
-                        volumes=volumes,
-                        restart_policy="Never"
-                    )
-                )
-            )
+            spec=job_spec
         )
         
         if show_yaml:
@@ -1028,16 +1190,19 @@ fi
                     )
                 )
                 
-                secret_volume_mounts.append(
-                    client.V1VolumeMount(
-                        name=sanitized_volume_name,
-                        mount_path=f"/k8r/secret/{secret_name}",
-                        read_only=True
+                # Add volume mounts for each secret key to avoid duplication
+                for key in secret_info["data_keys"]:
+                    secret_volume_mounts.append(
+                        client.V1VolumeMount(
+                            name=sanitized_volume_name,
+                            mount_path=f"/k8r/secrets/{key}",
+                            sub_path=key,
+                            read_only=True
+                        )
                     )
-                )
                 
                 for key in secret_info["data_keys"]:
-                    env_var_name = f"{secret_name.upper()}_{key.upper()}".replace("-", "_").replace(".", "_")
+                    env_var_name = key.upper().replace("-", "_").replace(".", "_")
                     secret_env_vars.append(
                         client.V1EnvVar(
                             name=env_var_name,
@@ -1300,6 +1465,9 @@ Examples:
     run_parser.add_argument("-d", "--detach", action="store_true", help="Run in background")
     run_parser.add_argument("--show-yaml", action="store_true", help="Print YAML to stdout instead of applying")
     run_parser.add_argument("--as-deployment", action="store_true", help="Create as Deployment instead of Job")
+    run_parser.add_argument("--retry", type=int, metavar="N", help="Set restart policy to OnFailure with backoff limit N (default: Never)")
+    run_parser.add_argument("-f", "--follow", action="store_true", help="Follow logs after job starts")
+    run_parser.add_argument("--rm", action="store_true", help="Delete existing job with same name before creating new one")
     
     # List command
     ls_parser = subparsers.add_parser("ls", help="List k8r jobs")
@@ -1313,6 +1481,7 @@ Examples:
     rm_parser = subparsers.add_parser("rm", help="Delete a job")
     rm_parser.add_argument("job_name", help="Job name")
     rm_parser.add_argument("-f", "--force", action="store_true", help="Force delete")
+    rm_parser.add_argument("--rm-secrets", action="store_true", help="Also remove associated secrets")
     
     # Secret command
     secret_parser = subparsers.add_parser("secret", help="Manage secrets")
@@ -1369,7 +1538,7 @@ Examples:
     elif args.command == "logs":
         k8r.get_job_logs(args.job_name, args.follow)
     elif args.command == "rm":
-        k8r.delete_job(args.job_name, args.force)
+        k8r.delete_job(args.job_name, args.force, args.rm_secrets)
     elif args.command == "secret":
         k8r.create_secret_with_options(args.secret_name, args.secret_value, 
                                      job_name=args.job_name, show_yaml=args.show_yaml)
@@ -1385,7 +1554,10 @@ Examples:
             job_name=args.job_name,
             detach=args.detach,
             show_yaml=args.show_yaml,
-            as_deployment=args.as_deployment
+            as_deployment=args.as_deployment,
+            retry_limit=args.retry,
+            follow=args.follow,
+            rm_existing=args.rm
         )
     else:
         parser.print_help()

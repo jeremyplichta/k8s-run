@@ -112,6 +112,9 @@ k8r ./ --as-deployment --num 3 -- python web_server.py
 
 # Preview YAML without applying
 k8r ./ --show-yaml -- python process.py
+
+# Delete existing job if it exists and create new one
+k8r ./ --rm -- python process.py
 ```
 
 ### 🐙 Run from GitHub
@@ -203,6 +206,8 @@ Create and run Kubernetes Jobs or Deployments.
 k8r [run] SOURCE [OPTIONS] -- COMMAND [ARGS...]
 ```
 
+> ⚠️ **Job Name Behavior**: k8r will now error if a job with the same name already exists, instead of auto-incrementing the name. Use `--rm` to delete the existing job first, or use a different `--job-name`.
+
 | Option | Description | Default | Example |
 |--------|-------------|---------|---------|
 | `--num N` | Number of parallel job instances | `1` | `--num 8` |
@@ -210,8 +215,11 @@ k8r [run] SOURCE [OPTIONS] -- COMMAND [ARGS...]
 | `--base-image IMAGE` | Base container for directory/GitHub mode | `alpine:latest` | `--base-image python:3.9` |
 | `--job-name NAME` | Custom job name | auto-generated | `--job-name my-job` |
 | `-d, --detach` | Run in background without monitoring | disabled | `-d` |
+| `-f, --follow` | Follow logs after job starts | disabled | `-f` |
 | `--show-yaml` | Print YAML to stdout instead of applying | disabled | `--show-yaml` |
 | `--as-deployment` | Create as Deployment instead of Job | disabled | `--as-deployment` |
+| `--retry N` | Set restart policy to OnFailure with backoff limit N | Never restart | `--retry 3` |
+| `--rm` | Delete existing job with same name before creating new one | disabled | `--rm` |
 
 ### 🛠️ Management Commands
 
@@ -220,7 +228,8 @@ k8r [run] SOURCE [OPTIONS] -- COMMAND [ARGS...]
 | `k8r ls` | 📋 List all k8r jobs | `k8r ls` |
 | `k8r logs <job-name>` | 📄 View job logs | `k8r logs my-job` |
 | `k8r logs <job-name> -f` | 📺 Follow logs in real-time | `k8r logs my-job -f` |
-| `k8r rm <job-name>` | 🗑️ Delete a job | `k8r rm my-job` |
+| `k8r rm <job-name>` | 🗑️ Delete a job (preserves secrets) | `k8r rm my-job` |
+| `k8r rm <job-name> --rm-secrets` | 🗑️ Delete job and associated secrets | `k8r rm my-job --rm-secrets` |
 | `k8r rm <job-name> -f` | ⚠️ Force delete (even with running pods) | `k8r rm my-job -f` |
 
 ### 🔐 Secret Management
@@ -271,6 +280,27 @@ redis-test   | container  | 1       | 0       | 1        | 0
 ```
 
 ## ⚙️ Advanced Usage
+
+### 🔁 Job Restart Policies
+
+k8r jobs use different restart policies depending on the `--retry` flag:
+
+| Configuration | Restart Policy | Behavior | Use Case |
+|---------------|----------------|----------|----------|
+| Default (no `--retry`) | `Never` | Job pods don't restart on failure | One-shot tasks, data processing |
+| `--retry N` | `OnFailure` | Job retries failed pods up to N times | Tasks that may fail temporarily |
+
+**Examples:**
+```bash
+# Default: Never restart on failure
+k8r ./ -- python critical_task.py
+
+# Retry up to 3 times on failure
+k8r ./ --retry 3 -- python flaky_network_task.py
+
+# Retry up to 5 times for unreliable operations
+k8r ./ --retry 5 -- curl https://unreliable-api.com/data
+```
 
 ### 🌍 Environment Variables
 
