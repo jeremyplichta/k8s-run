@@ -73,6 +73,20 @@ class K8sRun:
             
         self.namespace = os.environ.get('K8R_NAMESPACE', default_namespace)
 
+    def parse_resource_spec(self, resource_spec: Optional[str]) -> Optional[Tuple[str, str]]:
+        """Parse resource specification like '8gb', '2gb-8gb', '1000m', '500m-2000m', '1', '0.5-2'
+        Returns tuple of (requests, limits) or None if no spec provided"""
+        if not resource_spec:
+            return None
+        
+        if '-' in resource_spec:
+            parts = resource_spec.split('-', 1)
+            if len(parts) == 2:
+                return (parts[0].strip(), parts[1].strip())
+        
+        # Single value means both requests and limits are the same
+        return (resource_spec.strip(), resource_spec.strip())
+
     def detect_source_type(self, source: str) -> str:
         """Detect the type of source: directory, github, dockerfile, or container"""
         if source == "Dockerfile" or (os.path.isfile(source) and source.endswith("Dockerfile")):
@@ -944,7 +958,7 @@ fi
     def run_job_with_options(self, source: str, command: List[str], num_instances: int = 1, 
                            timeout: str = "1h", base_image: str = "alpine:latest", 
                            job_name: Optional[str] = None, detach: bool = False,
-                           show_yaml: bool = False, as_deployment: bool = False, retry_limit: Optional[int] = None, follow: bool = False, rm_existing: bool = False) -> None:
+                           show_yaml: bool = False, as_deployment: bool = False, retry_limit: Optional[int] = None, follow: bool = False, rm_existing: bool = False, memory: Optional[str] = None, cpu: Optional[str] = None) -> None:
         """Create and run a job with additional options"""
         
         # Handle --rm flag: delete existing job if it exists
@@ -960,7 +974,7 @@ fi
             job_name = self.create_deployment(
                 source=source, command=command, num_instances=num_instances,
                 timeout=timeout, base_image=base_image, job_name=job_name,
-                show_yaml=show_yaml
+                show_yaml=show_yaml, memory=memory, cpu=cpu
             )
             if not show_yaml:
                 print(f"Deployment '{job_name}' created")
@@ -968,7 +982,8 @@ fi
             job_name = self.create_job_with_yaml_option(
                 source=source, command=command, num_instances=num_instances,
                 timeout=timeout, base_image=base_image, job_name=job_name,
-                show_yaml=show_yaml, retry_limit=retry_limit, allow_existing=rm_existing
+                show_yaml=show_yaml, retry_limit=retry_limit, allow_existing=rm_existing,
+                memory=memory, cpu=cpu
             )
             if not show_yaml:
                 if follow and not detach:
@@ -978,7 +993,7 @@ fi
     
     def create_job_with_yaml_option(self, source: str, command: List[str], num_instances: int = 1, 
                                   timeout: str = "1h", base_image: str = "alpine:latest", 
-                                  job_name: Optional[str] = None, show_yaml: bool = False, retry_limit: Optional[int] = None, allow_existing: bool = False) -> str:
+                                  job_name: Optional[str] = None, show_yaml: bool = False, retry_limit: Optional[int] = None, allow_existing: bool = False, memory: Optional[str] = None, cpu: Optional[str] = None) -> str:
         """Create a job with option to output YAML instead of applying"""
         
         source_type = self.detect_source_type(source)
@@ -1082,6 +1097,27 @@ fi
             if job_secrets:
                 print(f"Mounting {len(job_secrets)} secrets for job '{final_job_name}'")
         
+        # Add resource specifications to container
+        memory_spec = self.parse_resource_spec(memory)
+        cpu_spec = self.parse_resource_spec(cpu)
+        
+        if memory_spec or cpu_spec:
+            requests = {}
+            limits = {}
+            
+            if memory_spec:
+                requests['memory'] = memory_spec[0]
+                limits['memory'] = memory_spec[1]
+            
+            if cpu_spec:
+                requests['cpu'] = cpu_spec[0]
+                limits['cpu'] = cpu_spec[1]
+            
+            container.resources = client.V1ResourceRequirements(
+                requests=requests if requests else None,
+                limits=limits if limits else None
+            )
+        
         # Determine restart policy and backoff limit
         restart_policy = "OnFailure" if retry_limit is not None else "Never"
         
@@ -1138,7 +1174,7 @@ fi
     
     def create_deployment(self, source: str, command: List[str], num_instances: int = 1, 
                          timeout: str = "1h", base_image: str = "alpine:latest", 
-                         job_name: Optional[str] = None, show_yaml: bool = False) -> str:
+                         job_name: Optional[str] = None, show_yaml: bool = False, memory: Optional[str] = None, cpu: Optional[str] = None) -> str:
         """Create a Deployment instead of a Job"""
         
         source_type = self.detect_source_type(source)
@@ -1226,6 +1262,27 @@ fi
                 container.env.extend(secret_env_vars)
             else:
                 container.env = secret_env_vars
+        
+        # Add resource specifications to container
+        memory_spec = self.parse_resource_spec(memory)
+        cpu_spec = self.parse_resource_spec(cpu)
+        
+        if memory_spec or cpu_spec:
+            requests = {}
+            limits = {}
+            
+            if memory_spec:
+                requests['memory'] = memory_spec[0]
+                limits['memory'] = memory_spec[1]
+            
+            if cpu_spec:
+                requests['cpu'] = cpu_spec[0]
+                limits['cpu'] = cpu_spec[1]
+            
+            container.resources = client.V1ResourceRequirements(
+                requests=requests if requests else None,
+                limits=limits if limits else None
+            )
         
         # Create deployment
         deployment = client.V1Deployment(
@@ -1468,6 +1525,8 @@ Examples:
     run_parser.add_argument("--retry", type=int, metavar="N", help="Set restart policy to OnFailure with backoff limit N (default: Never)")
     run_parser.add_argument("-f", "--follow", action="store_true", help="Follow logs after job starts")
     run_parser.add_argument("--rm", action="store_true", help="Delete existing job with same name before creating new one")
+    run_parser.add_argument("--mem", help="Memory request/limit (e.g., 8gb, 2gb-8gb)")
+    run_parser.add_argument("--cpu", help="CPU request/limit (e.g., 1000m, 500m-2000m, 1, 0.5-2)")
     
     # List command
     ls_parser = subparsers.add_parser("ls", help="List k8r jobs")
@@ -1557,7 +1616,9 @@ Examples:
             as_deployment=args.as_deployment,
             retry_limit=args.retry,
             follow=args.follow,
-            rm_existing=args.rm
+            rm_existing=args.rm,
+            memory=args.mem,
+            cpu=args.cpu
         )
     else:
         parser.print_help()

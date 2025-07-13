@@ -220,6 +220,8 @@ k8r [run] SOURCE [OPTIONS] -- COMMAND [ARGS...]
 | `--as-deployment` | Create as Deployment instead of Job | disabled | `--as-deployment` |
 | `--retry N` | Set restart policy to OnFailure with backoff limit N | Never restart | `--retry 3` |
 | `--rm` | Delete existing job with same name before creating new one | disabled | `--rm` |
+| `--mem MEMORY` | Memory request/limit (single value or range) | none | `--mem 8gb`, `--mem 2gb-8gb` |
+| `--cpu CPU` | CPU request/limit (single value or range) | none | `--cpu 1000m`, `--cpu 0.5-2` |
 
 ### 🛠️ Management Commands
 
@@ -321,6 +323,31 @@ k8r ./ --retry 5 -- curl https://unreliable-api.com/data
 - **🔐 Enhanced Secrets**: `k8r secret` command supports `--job-name` and `--show-yaml` options
 - **📍 Context Preservation**: Shell function now preserves original working directory for accurate job naming
 - **🔄 Self-Updating**: `k8r update` command for easy updates with branch switching support
+- **📊 Resource Management**: Use `--mem` and `--cpu` flags to specify resource requests and limits
+
+### 📊 Resource Management
+
+k8r supports specifying CPU and memory resources for your jobs:
+
+```bash
+# Single value sets both requests and limits
+k8r ./ --mem 8gb --cpu 1000m -- python heavy_task.py
+
+# Range format: requests-limits
+k8r ./ --mem 2gb-8gb --cpu 500m-2000m -- python scaling_task.py
+
+# CPU can use millicores (1000m = 1 CPU) or decimal (0.5 = 500m)
+k8r ./ --cpu 0.5 -- python light_task.py
+k8r ./ --cpu 0.5-2 -- python burst_task.py
+
+# Memory supports standard units
+k8r ./ --mem 512mi --cpu 250m -- python memory_task.py
+k8r ./ --mem 4gi -- python large_memory_task.py
+```
+
+**Resource Formats:**
+- **Memory**: `8gb`, `4gi`, `512mi`, `1024mb`, `2gb-8gb`
+- **CPU**: `1000m`, `1`, `0.5`, `500m-2000m`, `0.5-2`
 
 ### 🚀 Startup Scripts
 
@@ -376,16 +403,18 @@ k8r https://github.com/jeremyplichta/k8s-run.git --num 4 -- \
 ### 🤖 Machine Learning Training
 
 ```bash
-# Train ML model with GPU acceleration
-k8r ./ml-training --base-image tensorflow/tensorflow:latest-gpu -- \
+# Train ML model with GPU acceleration and high memory
+k8r ./ml-training --base-image tensorflow/tensorflow:latest-gpu \
+  --mem 16gb --cpu 4 -- \
   python train.py --epochs 100 --learning-rate 0.001
 ```
 
 ### ⚡ High-Throughput Batch Processing
 
 ```bash
-# Process job queue with 20 workers
-k8r ./batch-processor --num 20 --timeout 4h -- \
+# Process job queue with 20 workers and resource limits
+k8r ./batch-processor --num 20 --timeout 4h \
+  --mem 4gb-8gb --cpu 500m-2000m -- \
   python worker.py --queue redis://redis:6379 --batch-size 50
 ```
 
