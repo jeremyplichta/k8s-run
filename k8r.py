@@ -186,7 +186,7 @@ class K8sRun:
 
     def create_job(self, source: str, command: List[str], num_instances: int = 1, 
                    timeout: str = "1h", base_image: str = "alpine:latest", 
-                   job_name: Optional[str] = None, retry_limit: Optional[int] = None) -> str:
+                   job_name: Optional[str] = None, retry_limit: Optional[int] = None, secret_job_name: Optional[str] = None) -> str:
         """Create a Kubernetes job"""
         
         source_type = self.detect_source_type(source)
@@ -218,7 +218,9 @@ class K8sRun:
             raise ValueError(f"Unsupported source type: {source_type}")
         
         # Discover and mount secrets for this job
-        job_secrets = self.get_job_secrets(final_job_name)
+        # Use secret_job_name if provided, otherwise use the actual job name
+        secrets_lookup_name = secret_job_name if secret_job_name else final_job_name
+        job_secrets = self.get_job_secrets(secrets_lookup_name)
         secret_volumes = []
         secret_volume_mounts = []
         secret_env_vars = []
@@ -277,7 +279,10 @@ class K8sRun:
             container.env = secret_env_vars
         
         if job_secrets:
-            print(f"Mounting {len(job_secrets)} secrets for job '{final_job_name}'")
+            if secret_job_name:
+                print(f"Mounting {len(job_secrets)} secrets from job '{secret_job_name}' for job '{final_job_name}'")
+            else:
+                print(f"Mounting {len(job_secrets)} secrets for job '{final_job_name}'")
         
         # Determine restart policy and backoff limit
         restart_policy = "OnFailure" if retry_limit is not None else "Never"
@@ -958,7 +963,7 @@ fi
     def run_job_with_options(self, source: str, command: List[str], num_instances: int = 1, 
                            timeout: str = "1h", base_image: str = "alpine:latest", 
                            job_name: Optional[str] = None, detach: bool = False,
-                           show_yaml: bool = False, as_deployment: bool = False, retry_limit: Optional[int] = None, follow: bool = False, rm_existing: bool = False, memory: Optional[str] = None, cpu: Optional[str] = None) -> None:
+                           show_yaml: bool = False, as_deployment: bool = False, retry_limit: Optional[int] = None, follow: bool = False, rm_existing: bool = False, memory: Optional[str] = None, cpu: Optional[str] = None, secret_job_name: Optional[str] = None) -> None:
         """Create and run a job with additional options"""
         
         # Handle --rm flag: delete existing job if it exists
@@ -974,7 +979,7 @@ fi
             job_name = self.create_deployment(
                 source=source, command=command, num_instances=num_instances,
                 timeout=timeout, base_image=base_image, job_name=job_name,
-                show_yaml=show_yaml, memory=memory, cpu=cpu
+                show_yaml=show_yaml, memory=memory, cpu=cpu, secret_job_name=secret_job_name
             )
             if not show_yaml:
                 print(f"Deployment '{job_name}' created")
@@ -983,7 +988,7 @@ fi
                 source=source, command=command, num_instances=num_instances,
                 timeout=timeout, base_image=base_image, job_name=job_name,
                 show_yaml=show_yaml, retry_limit=retry_limit, allow_existing=rm_existing,
-                memory=memory, cpu=cpu
+                memory=memory, cpu=cpu, secret_job_name=secret_job_name
             )
             if not show_yaml:
                 if follow and not detach:
@@ -993,7 +998,7 @@ fi
     
     def create_job_with_yaml_option(self, source: str, command: List[str], num_instances: int = 1, 
                                   timeout: str = "1h", base_image: str = "alpine:latest", 
-                                  job_name: Optional[str] = None, show_yaml: bool = False, retry_limit: Optional[int] = None, allow_existing: bool = False, memory: Optional[str] = None, cpu: Optional[str] = None) -> str:
+                                  job_name: Optional[str] = None, show_yaml: bool = False, retry_limit: Optional[int] = None, allow_existing: bool = False, memory: Optional[str] = None, cpu: Optional[str] = None, secret_job_name: Optional[str] = None) -> str:
         """Create a job with option to output YAML instead of applying"""
         
         source_type = self.detect_source_type(source)
@@ -1029,22 +1034,30 @@ fi
         else:
             raise ValueError(f"Unsupported source type: {source_type}")
         
-        # Handle secrets (skip for show_yaml mode to avoid side effects)
+        # Handle secrets (always include for show_yaml mode)
         secret_volumes = []
         secret_volume_mounts = []
         secret_env_vars = []
         
-        # Get job secrets (even in show_yaml mode to demonstrate mounting)
-        job_secrets = self.get_job_secrets(final_job_name) if not show_yaml else []
-        
-        # For show_yaml mode, try to get secrets anyway for demonstration
-        if show_yaml and not job_secrets:
-            try:
-                job_secrets = self.get_job_secrets(final_job_name)
-            except:
-                pass  # Ignore errors in show_yaml mode
+        # Get job secrets (include in show_yaml mode to demonstrate mounting)
+        # Use secret_job_name if provided, otherwise use the actual job name
+        secrets_lookup_name = secret_job_name if secret_job_name else final_job_name
+        job_secrets = self.get_job_secrets(secrets_lookup_name)
         
         if job_secrets:
+            if show_yaml:
+                if secret_job_name:
+                    print(f"⚠️  YAML includes {len(job_secrets)} secrets from job '{secret_job_name}' - these secrets must exist when applying this YAML")
+                else:
+                    print(f"⚠️  YAML includes {len(job_secrets)} secrets for job '{final_job_name}' - these secrets must exist when applying this YAML")
+            else:
+                # Only show mounting message for actual execution, not YAML generation
+                if secret_job_name:
+                    print(f"Mounting {len(job_secrets)} secrets from job '{secret_job_name}' for job '{final_job_name}'")
+                else:
+                    print(f"Mounting {len(job_secrets)} secrets for job '{final_job_name}'")
+            
+            # Process secret mounting for all modes
             for secret_info in job_secrets:
                 secret_name = secret_info["secret_name"]
                 secret_k8s_name = secret_info["name"]
@@ -1093,9 +1106,6 @@ fi
                 container.env.extend(secret_env_vars)
             else:
                 container.env = secret_env_vars
-            
-            if job_secrets:
-                print(f"Mounting {len(job_secrets)} secrets for job '{final_job_name}'")
         
         # Add resource specifications to container
         memory_spec = self.parse_resource_spec(memory)
@@ -1174,7 +1184,7 @@ fi
     
     def create_deployment(self, source: str, command: List[str], num_instances: int = 1, 
                          timeout: str = "1h", base_image: str = "alpine:latest", 
-                         job_name: Optional[str] = None, show_yaml: bool = False, memory: Optional[str] = None, cpu: Optional[str] = None) -> str:
+                         job_name: Optional[str] = None, show_yaml: bool = False, memory: Optional[str] = None, cpu: Optional[str] = None, secret_job_name: Optional[str] = None) -> str:
         """Create a Deployment instead of a Job"""
         
         source_type = self.detect_source_type(source)
@@ -1207,13 +1217,23 @@ fi
         else:
             raise ValueError(f"Unsupported source type: {source_type}")
         
-        # Handle secrets (skip for show_yaml mode)
+        # Handle secrets (always include for show_yaml mode)
         secret_volumes = []
         secret_volume_mounts = []
         secret_env_vars = []
         
-        if not show_yaml:
-            job_secrets = self.get_job_secrets(final_deployment_name)
+        # Use secret_job_name if provided, otherwise use the actual deployment name
+        secrets_lookup_name = secret_job_name if secret_job_name else final_deployment_name
+        job_secrets = self.get_job_secrets(secrets_lookup_name)
+        
+        if job_secrets:
+            if show_yaml:
+                if secret_job_name:
+                    print(f"⚠️  YAML includes {len(job_secrets)} secrets from job '{secret_job_name}' - these secrets must exist when applying this YAML")
+                else:
+                    print(f"⚠️  YAML includes {len(job_secrets)} secrets for job '{final_deployment_name}' - these secrets must exist when applying this YAML")
+            
+        if job_secrets:
             for secret_info in job_secrets:
                 secret_name = secret_info["secret_name"]
                 secret_k8s_name = secret_info["name"]
@@ -1527,6 +1547,7 @@ Examples:
     run_parser.add_argument("--rm", action="store_true", help="Delete existing job with same name before creating new one")
     run_parser.add_argument("--mem", help="Memory request/limit (e.g., 8gb, 2gb-8gb)")
     run_parser.add_argument("--cpu", help="CPU request/limit (e.g., 1000m, 500m-2000m, 1, 0.5-2)")
+    run_parser.add_argument("--secret-job", help="Use secrets from a different job name (for sharing secrets between jobs)")
     
     # List command
     ls_parser = subparsers.add_parser("ls", help="List k8r jobs")
@@ -1618,7 +1639,8 @@ Examples:
             follow=args.follow,
             rm_existing=args.rm,
             memory=args.mem,
-            cpu=args.cpu
+            cpu=args.cpu,
+            secret_job_name=args.secret_job
         )
     else:
         parser.print_help()

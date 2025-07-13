@@ -164,6 +164,9 @@ k8r secret my-secret "value" --show-yaml
 
 # Associate secret with specific job
 k8r secret api-key "value" --job-name my-custom-job
+
+# Share secrets between jobs
+k8r ./new-job --secret-job existing-job -- python script.py
 ```
 
 ### 🌐 Namespace Management
@@ -222,6 +225,7 @@ k8r [run] SOURCE [OPTIONS] -- COMMAND [ARGS...]
 | `--rm` | Delete existing job with same name before creating new one | disabled | `--rm` |
 | `--mem MEMORY` | Memory request/limit (single value or range) | none | `--mem 8gb`, `--mem 2gb-8gb` |
 | `--cpu CPU` | CPU request/limit (single value or range) | none | `--cpu 1000m`, `--cpu 0.5-2` |
+| `--secret-job JOB_NAME` | Use secrets from a different job name | current job | `--secret-job existing-job` |
 
 ### 🛠️ Management Commands
 
@@ -321,9 +325,36 @@ k8r ./ --retry 5 -- curl https://unreliable-api.com/data
 - **🚀 Deployment Mode**: Use `--as-deployment` to create long-running Deployments instead of Jobs
 - **🌐 Namespace Support**: Global `--namespace` option works with all commands
 - **🔐 Enhanced Secrets**: `k8r secret` command supports `--job-name` and `--show-yaml` options
+- **🔗 Secret Sharing**: Use `--secret-job` to mount secrets from other jobs without duplication
 - **📍 Context Preservation**: Shell function now preserves original working directory for accurate job naming
 - **🔄 Self-Updating**: `k8r update` command for easy updates with branch switching support
 - **📊 Resource Management**: Use `--mem` and `--cpu` flags to specify resource requests and limits
+
+### 🔗 Secret Sharing Between Jobs
+
+The `--secret-job` option allows you to mount secrets from one job into another, enabling secret sharing without duplication:
+
+```bash
+# Create secrets for a base job
+k8r secret database-url "postgres://user:pass@db:5432/app" --job-name base-job
+k8r secret api-key "secret-api-key-123" --job-name base-job
+
+# Create new jobs that use the same secrets
+k8r ./worker-1 --secret-job base-job -- python worker.py
+k8r ./worker-2 --secret-job base-job -- python different_worker.py
+
+# Works with deployments too
+k8r ./api-server --secret-job base-job --as-deployment -- python server.py
+
+# You can still specify your own job name while using another job's secrets
+k8r ./new-service --job-name my-service --secret-job base-job -- python service.py
+```
+
+This feature is particularly useful for:
+- **Microservices** that need shared database credentials or API keys
+- **CI/CD pipelines** where multiple jobs need the same secrets
+- **Multi-environment deployments** where secrets are managed centrally
+- **Blue-green deployments** where new versions need existing secrets
 
 ### 📊 Resource Management
 
