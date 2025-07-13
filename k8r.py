@@ -60,6 +60,7 @@ class K8sRun:
         
         self.batch_v1 = client.BatchV1Api()
         self.core_v1 = client.CoreV1Api()
+        self.apps_v1 = client.AppsV1Api()
         
         # Get namespace from current context or environment variable
         try:
@@ -79,13 +80,26 @@ class K8sRun:
         if not resource_spec:
             return None
         
+        def normalize_quantity(value: str) -> str:
+            """Normalize resource quantity to Kubernetes-compatible format"""
+            value = value.strip()
+            # Convert 'gb' to 'Gi' (gibibytes) for proper Kubernetes format
+            if value.endswith('gb'):
+                return value[:-2] + 'Gi'
+            # Convert 'mb' to 'Mi' (mebibytes) for proper Kubernetes format  
+            elif value.endswith('mb'):
+                return value[:-2] + 'Mi'
+            # Keep other formats as-is (m, G, M, etc.)
+            return value
+        
         if '-' in resource_spec:
             parts = resource_spec.split('-', 1)
             if len(parts) == 2:
-                return (parts[0].strip(), parts[1].strip())
+                return (normalize_quantity(parts[0]), normalize_quantity(parts[1]))
         
         # Single value means both requests and limits are the same
-        return (resource_spec.strip(), resource_spec.strip())
+        normalized = normalize_quantity(resource_spec)
+        return (normalized, normalized)
 
     def detect_source_type(self, source: str) -> str:
         """Detect the type of source: directory, github, dockerfile, or container"""
@@ -583,52 +597,86 @@ fi
             time.sleep(1)
 
     def list_jobs(self) -> None:
-        """List current k8r jobs"""
+        """List current k8r jobs and deployments"""
         try:
-            # Filter for jobs created by k8r
+            # Get both jobs and deployments created by k8r
             jobs = self.batch_v1.list_namespaced_job(
                 namespace=self.namespace,
                 label_selector="created-by=k8r"
             )
             
-            if not jobs.items:
-                print("No k8r jobs found in namespace: " + self.namespace)
+            deployments = self.apps_v1.list_namespaced_deployment(
+                namespace=self.namespace,
+                label_selector="created-by=k8r,k8r-type=deployment"
+            )
+            
+            all_items = []
+            
+            # Process jobs
+            for job in jobs.items:
+                all_items.append({
+                    'name': job.metadata.name,
+                    'kind': 'Job',
+                    'source_type': job.metadata.labels.get("k8r-source-type", "unknown"),
+                    'desired': job.spec.completions or 0,
+                    'running': job.status.active or 0,
+                    'complete': job.status.succeeded or 0,
+                    'failed': job.status.failed or 0
+                })
+            
+            # Process deployments
+            for deployment in deployments.items:
+                all_items.append({
+                    'name': deployment.metadata.name,
+                    'kind': 'Deployment',
+                    'source_type': deployment.metadata.labels.get("k8r-source-type", "unknown"),
+                    'desired': deployment.spec.replicas or 0,
+                    'running': deployment.status.ready_replicas or 0,
+                    'complete': deployment.status.ready_replicas or 0,
+                    'failed': (deployment.status.replicas or 0) - (deployment.status.ready_replicas or 0)
+                })
+            
+            if not all_items:
+                print("No k8r jobs or deployments found in namespace: " + self.namespace)
                 return
             
             # Calculate column widths based on content
-            max_name_len = max(len(job.metadata.name) for job in jobs.items)
-            name_width = max(max_name_len, len("Job Name")) + 2
+            max_name_len = max(len(item['name']) for item in all_items)
+            name_width = max(max_name_len, len("Name")) + 2
             
             # Print header
-            header = f"{'Job Name':<{name_width}} | {'Type':<10} | {'Desired':<7} | {'Running':<7} | {'Complete':<8} | {'Failed':<6}"
+            header = f"{'Name':<{name_width}} | {'Kind':<10} | {'Type':<10} | {'Desired':<7} | {'Running':<7} | {'Ready':<5} | {'Failed':<6}"
             print(header)
             print("=" * len(header))
             
-            for job in jobs.items:
-                name = job.metadata.name
-                source_type = job.metadata.labels.get("k8r-source-type", "unknown")
-                desired = job.spec.completions or 0
-                status = job.status
-                running = status.active or 0
-                complete = status.succeeded or 0
-                failed = status.failed or 0
-                
-                print(f"{name:<{name_width}} | {source_type:<10} | {desired:<7} | {running:<7} | {complete:<8} | {failed:<6}")
+            # Sort by name for consistent output
+            all_items.sort(key=lambda x: x['name'])
+            
+            for item in all_items:
+                print(f"{item['name']:<{name_width}} | {item['kind']:<10} | {item['source_type']:<10} | {item['desired']:<7} | {item['running']:<7} | {item['complete']:<5} | {item['failed']:<6}")
                 
         except Exception as e:
-            print(f"Error listing jobs: {e}")
+            print(f"Error listing jobs and deployments: {e}")
 
     def get_job_logs(self, job_name: str, follow: bool = False) -> None:
-        """Get logs for a job"""
+        """Get logs for a job or deployment"""
         try:
-            # Get pods for the k8r job
+            # Try to find pods for either job or deployment
+            # First try job label
             pods = self.core_v1.list_namespaced_pod(
                 namespace=self.namespace,
                 label_selector=f"k8r-job={job_name},created-by=k8r"
             )
             
+            # If no pods found, try deployment label
             if not pods.items:
-                print(f"No pods found for job '{job_name}'")
+                pods = self.core_v1.list_namespaced_pod(
+                    namespace=self.namespace,
+                    label_selector=f"k8r-deployment={job_name},created-by=k8r"
+                )
+            
+            if not pods.items:
+                print(f"No pods found for job or deployment '{job_name}'")
                 return
             
             for pod in pods.items:
@@ -660,37 +708,66 @@ fi
             print(f"Error getting job logs: {e}")
 
     def delete_job(self, job_name: str, force: bool = False, rm_secrets: bool = False) -> None:
-        """Delete a k8r job"""
+        """Delete a k8r job or deployment"""
         try:
+            resource_type = None
+            resource_found = False
+            
             # Check if this is a k8r job
             try:
                 job = self.batch_v1.read_namespaced_job(name=job_name, namespace=self.namespace)
-                if not job.metadata.labels or job.metadata.labels.get("created-by") != "k8r":
-                    print(f"Job '{job_name}' was not created by k8r")
-                    return
+                if job.metadata.labels and job.metadata.labels.get("created-by") == "k8r":
+                    resource_type = "job"
+                    resource_found = True
             except Exception:
-                print(f"Job '{job_name}' not found")
+                pass
+            
+            # If not a job, check if it's a deployment
+            if not resource_found:
+                try:
+                    deployment = self.apps_v1.read_namespaced_deployment(name=job_name, namespace=self.namespace)
+                    if deployment.metadata.labels and deployment.metadata.labels.get("created-by") == "k8r":
+                        resource_type = "deployment"
+                        resource_found = True
+                except Exception:
+                    pass
+            
+            if not resource_found:
+                print(f"Job or deployment '{job_name}' not found or was not created by k8r")
                 return
             
-            # Check if job has running pods
-            pods = self.core_v1.list_namespaced_pod(
-                namespace=self.namespace,
-                label_selector=f"k8r-job={job_name},created-by=k8r"
-            )
+            # Check if resource has running pods
+            if resource_type == "job":
+                pods = self.core_v1.list_namespaced_pod(
+                    namespace=self.namespace,
+                    label_selector=f"k8r-job={job_name},created-by=k8r"
+                )
+            else:  # deployment
+                pods = self.core_v1.list_namespaced_pod(
+                    namespace=self.namespace,
+                    label_selector=f"k8r-deployment={job_name},created-by=k8r"
+                )
             
             running_pods = [pod for pod in pods.items if pod.status.phase == "Running"]
             
             if running_pods and not force:
-                print(f"Warning: Job '{job_name}' has {len(running_pods)} running pods.")
+                print(f"Warning: {resource_type.title()} '{job_name}' has {len(running_pods)} running pods.")
                 print("Use -f/--force to delete anyway.")
                 return
             
-            # Delete the job
-            self.batch_v1.delete_namespaced_job(
-                name=job_name,
-                namespace=self.namespace,
-                propagation_policy="Background"
-            )
+            # Delete the resource
+            if resource_type == "job":
+                self.batch_v1.delete_namespaced_job(
+                    name=job_name,
+                    namespace=self.namespace,
+                    propagation_policy="Background"
+                )
+            else:  # deployment
+                self.apps_v1.delete_namespaced_deployment(
+                    name=job_name,
+                    namespace=self.namespace,
+                    propagation_policy="Background"
+                )
             
             # Delete associated configmap if it exists
             try:
@@ -1346,8 +1423,7 @@ fi
             return final_deployment_name
         
         # Apply the deployment
-        apps_v1 = client.AppsV1Api()
-        apps_v1.create_namespaced_deployment(namespace=self.namespace, body=deployment)
+        self.apps_v1.create_namespaced_deployment(namespace=self.namespace, body=deployment)
         return final_deployment_name
 
 

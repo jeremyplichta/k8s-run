@@ -151,6 +151,39 @@ All resource formats tested successfully:
 - ✅ Both Jobs and Deployments work correctly with secrets in YAML mode
 - ✅ `kubectl apply --dry-run=client` validates generated YAML successfully
 
+### Critical Fix - Resource Quantity Format Error
+
+- [2025-07-13 16:00:00] 🐛 **Issue Discovered**: Kubernetes rejected deployments with invalid quantity format `memory: 12gb`
+- [2025-07-13 16:10:00] ✅ **Root Cause**: The `parse_resource_spec()` function was returning raw values like "12gb" instead of Kubernetes-compatible formats
+- [2025-07-13 16:15:00] ✅ **Kubernetes Requirements**: Memory quantities must use formats like "12Gi" (gibibytes) or "12G" (gigabytes), not "12gb"
+- [2025-07-13 16:20:00] ✅ **Fixed**: Enhanced `parse_resource_spec()` with `normalize_quantity()` function to convert formats automatically
+- [2025-07-13 16:25:00] ✅ **Tested**: Verified fix with kubectl dry-run validation
+
+**The Problem:**
+- Error: `quantities must match the regular expression '^([+-]?[0-9.]+)([eEinumkKMGTP]*[-+]?[0-9]*)$'`
+- User-friendly formats like "12gb" were being passed directly to Kubernetes
+- Kubernetes requires specific unit suffixes: Gi, Mi, G, M, etc.
+
+**The Fix:**
+- Added `normalize_quantity()` helper function inside `parse_resource_spec()`
+- Converts "gb" → "Gi" (gibibytes) for proper Kubernetes format
+- Converts "mb" → "Mi" (mebibytes) for proper Kubernetes format  
+- Keeps other valid formats unchanged (m, G, M, etc.)
+- Applied to both single values and range specifications
+
+**Files Modified:**
+1. **k8r.py:76-101** - Enhanced `parse_resource_spec()` method
+   - Added nested `normalize_quantity()` function
+   - Automatic format conversion for user-friendly input
+   - Maintains backward compatibility with existing formats
+
+**Testing Results:**
+- ✅ `--mem 12gb` now generates `memory: 12Gi` in YAML output
+- ✅ `kubectl apply --dry-run=client` validates successfully  
+- ✅ Both Jobs and Deployments work with normalized quantities
+- ✅ Range formats work: `--mem 2gb-8gb` → requests: 2Gi, limits: 8Gi
+- ✅ Other formats preserved: `--cpu 1000m` unchanged
+
 ---
 
 *This file serves as your working memory for this task. Keep it updated as you progress through the implementation.*
