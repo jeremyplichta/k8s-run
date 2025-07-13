@@ -123,6 +123,34 @@ All resource formats tested successfully:
 - ✅ Cross-job secret references work in all modes
 - ✅ No secrets case handled gracefully
 
+### Critical Fix - YAML Parsing Error with Secret Warnings
+
+- [2025-07-13 15:00:00] 🐛 **Issue Discovered**: YAML parsing failed when secrets were included due to warning messages being printed to stdout
+- [2025-07-13 15:15:00] ✅ **Root Cause**: Warning messages like `⚠️ YAML includes N secrets from job 'job-name'` were being printed to stdout, contaminating the YAML output
+- [2025-07-13 15:20:00] ✅ **Fixed**: Modified all secret warning print statements to use `file=sys.stderr` instead of stdout
+- [2025-07-13 15:25:00] ✅ **Tested**: Verified YAML output is now clean and valid, warnings appear on stderr
+
+**The Problem:**
+- When using `--show-yaml` with secrets, warning messages were printed to stdout along with the YAML
+- This caused `kubectl apply` to fail with "mapping values are not allowed in this context" error
+- Error occurred at line 2 because the warning message appeared before the actual YAML content
+
+**The Fix:**
+- Changed four print statements in k8r.py:1050, 1052, 1232, and 1234 to use `file=sys.stderr`
+- This ensures warning messages go to stderr while clean YAML goes to stdout
+- Maintains the informative warnings while fixing the parsing issue
+
+**Files Modified:**
+1. **k8r.py** - Lines 1050, 1052, 1232, 1234
+   - Added `file=sys.stderr` parameter to all secret warning print statements
+   - Preserved warning functionality while fixing YAML output contamination
+
+**Testing Results:**
+- ✅ YAML output is now clean and parseable by kubectl
+- ✅ Warning messages still appear on stderr for user awareness
+- ✅ Both Jobs and Deployments work correctly with secrets in YAML mode
+- ✅ `kubectl apply --dry-run=client` validates generated YAML successfully
+
 ---
 
 *This file serves as your working memory for this task. Keep it updated as you progress through the implementation.*

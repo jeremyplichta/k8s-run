@@ -1047,9 +1047,9 @@ fi
         if job_secrets:
             if show_yaml:
                 if secret_job_name:
-                    print(f"⚠️  YAML includes {len(job_secrets)} secrets from job '{secret_job_name}' - these secrets must exist when applying this YAML")
+                    print(f"⚠️  YAML includes {len(job_secrets)} secrets from job '{secret_job_name}' - these secrets must exist when applying this YAML", file=sys.stderr)
                 else:
-                    print(f"⚠️  YAML includes {len(job_secrets)} secrets for job '{final_job_name}' - these secrets must exist when applying this YAML")
+                    print(f"⚠️  YAML includes {len(job_secrets)} secrets for job '{final_job_name}' - these secrets must exist when applying this YAML", file=sys.stderr)
             else:
                 # Only show mounting message for actual execution, not YAML generation
                 if secret_job_name:
@@ -1229,9 +1229,9 @@ fi
         if job_secrets:
             if show_yaml:
                 if secret_job_name:
-                    print(f"⚠️  YAML includes {len(job_secrets)} secrets from job '{secret_job_name}' - these secrets must exist when applying this YAML")
+                    print(f"⚠️  YAML includes {len(job_secrets)} secrets from job '{secret_job_name}' - these secrets must exist when applying this YAML", file=sys.stderr)
                 else:
-                    print(f"⚠️  YAML includes {len(job_secrets)} secrets for job '{final_deployment_name}' - these secrets must exist when applying this YAML")
+                    print(f"⚠️  YAML includes {len(job_secrets)} secrets for job '{final_deployment_name}' - these secrets must exist when applying this YAML", file=sys.stderr)
             
         if job_secrets:
             for secret_info in job_secrets:
