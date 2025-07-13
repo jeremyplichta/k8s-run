@@ -115,7 +115,7 @@ class K8sRun:
             raise ValueError(f"Could not determine source type for: {source}")
 
     def generate_job_name(self, source: str, job_name: Optional[str] = None, allow_existing: bool = False) -> str:
-        """Generate a job name"""
+        """Generate a job name with proper length limits for Kubernetes"""
         if job_name:
             base_name = job_name
         elif source == "." or source == "./":
@@ -132,7 +132,9 @@ class K8sRun:
         else:
             base_name = re.sub(r'[^a-z0-9-]', '-', source.lower())
 
-        final_name = re.sub(r'[^a-z0-9-]', '-', base_name.lower()).strip('-')
+        # Sanitize and truncate the name, leaving room for common suffixes like "-source" (7 chars)
+        # This ensures compound names like "{job_name}-source" don't exceed 63 chars
+        final_name = self.sanitize_k8s_name(base_name, max_length=55)
         
         # Check if job exists and error if not allowed
         if self.job_exists(final_name) and not allow_existing:
@@ -243,8 +245,9 @@ class K8sRun:
             secret_name = secret_info["secret_name"]
             secret_k8s_name = secret_info["name"]
             
-            # Add volume for secret files
-            sanitized_volume_name = f"secret-{self.sanitize_k8s_name(secret_name)}"
+            # Add volume for secret files (ensure name doesn't exceed 63 chars)
+            sanitized_secret_name = self.sanitize_k8s_name(secret_name, max_length=56)  # 63 - 7 for "secret-"
+            sanitized_volume_name = f"secret-{sanitized_secret_name}"
             secret_volumes.append(
                 client.V1Volume(
                     name=sanitized_volume_name,
@@ -853,7 +856,7 @@ fi
             print(f"Warning: Error listing secrets for job {job_name}: {e}")
             return []
 
-    def sanitize_k8s_name(self, name: str) -> str:
+    def sanitize_k8s_name(self, name: str, max_length: int = 63) -> str:
         """Sanitize a name to be compliant with Kubernetes RFC 1123 subdomain rules"""
         # Convert to lowercase
         name = name.lower()
@@ -868,9 +871,15 @@ fi
         # Collapse multiple consecutive hyphens/dots
         name = re.sub(r'[-\.]+', '-', name)
         
-        # Ensure it's not empty and doesn't exceed length limits
+        # Ensure it's not empty
         if not name:
             name = 'unnamed'
+        
+        # Truncate to max_length (default 63 chars for Kubernetes)
+        if len(name) > max_length:
+            name = name[:max_length]
+            # Ensure truncated name doesn't end with hyphen or dot
+            name = re.sub(r'[^a-z0-9]+$', '', name)
         
         return name
 
@@ -878,6 +887,14 @@ fi
         """Create a Kubernetes secret with k8r labels"""
         job_name = self.get_job_name_from_directory()
         sanitized_secret_name = self.sanitize_k8s_name(secret_name)
+        # Ensure full secret name doesn't exceed 63 characters
+        max_secret_name_length = 63 - len(job_name) - 1  # -1 for the hyphen
+        if max_secret_name_length <= 0:
+            # Job name is too long, truncate it to allow for secret name
+            job_name = self.sanitize_k8s_name(job_name, max_length=50)
+            max_secret_name_length = 63 - len(job_name) - 1
+        if len(sanitized_secret_name) > max_secret_name_length:
+            sanitized_secret_name = self.sanitize_k8s_name(sanitized_secret_name, max_length=max_secret_name_length)
         full_secret_name = f"{job_name}-{sanitized_secret_name}"
         
         # Prepare secret data
@@ -961,6 +978,14 @@ fi
         # Use provided job name or fall back to directory-based name
         effective_job_name = job_name if job_name else original_job_name
         sanitized_secret_name = self.sanitize_k8s_name(secret_name)
+        # Ensure full secret name doesn't exceed 63 characters
+        max_secret_name_length = 63 - len(effective_job_name) - 1  # -1 for the hyphen
+        if max_secret_name_length <= 0:
+            # Job name is too long, truncate it to allow for secret name
+            effective_job_name = self.sanitize_k8s_name(effective_job_name, max_length=50)
+            max_secret_name_length = 63 - len(effective_job_name) - 1
+        if len(sanitized_secret_name) > max_secret_name_length:
+            sanitized_secret_name = self.sanitize_k8s_name(sanitized_secret_name, max_length=max_secret_name_length)
         full_secret_name = f"{effective_job_name}-{sanitized_secret_name}"
         
         # Prepare secret data (same logic as original create_secret)
@@ -1139,7 +1164,7 @@ fi
                 secret_name = secret_info["secret_name"]
                 secret_k8s_name = secret_info["name"]
                 
-                sanitized_volume_name = f"secret-{self.sanitize_k8s_name(secret_name)}"
+                sanitized_volume_name = f"secret-{self.sanitize_k8s_name(secret_name, max_length=56)}"
                 secret_volumes.append(
                     client.V1Volume(
                         name=sanitized_volume_name,
@@ -1315,7 +1340,7 @@ fi
                 secret_name = secret_info["secret_name"]
                 secret_k8s_name = secret_info["name"]
                 
-                sanitized_volume_name = f"secret-{self.sanitize_k8s_name(secret_name)}"
+                sanitized_volume_name = f"secret-{self.sanitize_k8s_name(secret_name, max_length=56)}"
                 secret_volumes.append(
                     client.V1Volume(
                         name=sanitized_volume_name,
