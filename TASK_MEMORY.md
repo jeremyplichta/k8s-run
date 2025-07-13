@@ -1,84 +1,58 @@
 # Task Memory
 
-**Created:** 2025-07-11 19:16:49
-**Branch:** feature/args-clarity
+**Created:** 2025-07-13 10:15:24  
+**Branch:** feature/add-k8s-resource
 
-## Requirements
+## Completed Features
 
-# args clarity
+### 1. Resource Arguments (`--mem`, `--cpu`)
+**Purpose:** Added CPU and memory resource specification for Jobs and Deployments
 
-## Description
-The help output of k8r.py is kinda confusing right now
+**Key Implementation:**
+- `parse_resource_spec()` method with `normalize_quantity()` helper
+- Supports single values: `--mem 8gb --cpu 1000m`
+- Supports ranges: `--mem 2gb-8gb --cpu 500m-2000m`
+- Auto-converts "gb"→"Gi", "mb"→"Mi" for Kubernetes compatibility
 
-```
-usage: k8r.py [-h] [--num NUM] [--timeout TIMEOUT] [--base-image BASE_IMAGE] [--job-name JOB_NAME] [-d] source
+**Files Modified:** k8r.py (argument parsing, resource logic), README.md (documentation)
 
-k8s-run (k8r) - Run jobs in Kubernetes
+### 2. Secret Job Reference (`--secret-job`)
+**Purpose:** Allow jobs to reference secrets from other jobs without duplication
 
-positional arguments:
-  source                Source: directory, GitHub URL, Dockerfile, or container image
+**Key Implementation:**
+- `--secret-job` option to specify different job name for secret discovery
+- Example: `k8r alpine:latest --job-name new-job --secret-job existing-job`
+- Works with both Jobs and Deployments, graceful fallback for non-existent refs
 
-options:
-  -h, --help            show this help message and exit
-  --num NUM             Number of job instances
-  --timeout TIMEOUT     Job timeout (e.g., 1h, 30m, 3600s)
-  --base-image BASE_IMAGE
-                        Base container image
-  --job-name JOB_NAME   Override job name
-  -d, --detach          Run in background
-```
+**Files Modified:** k8r.py (CLI parsing, secret discovery logic)
 
-In addition to arg clarity there are a few extra features at the end to implement
+### 3. Critical Fixes
 
-## Tasks
-- [ ] Refactor it so that the help text clearly shows the main command types (ls rm secret) etc
-- [ ] The default command type is to launch something, but maybe it should be called "run", if you dont specify a command it assumes run
-- [ ] Each command can have different args (the ones that make sense. Some of them are common (like --job-name
-- [ ] You should be able to get different help output and detailed help if you run k8r run -h vs k8r -h vs k8r secret -h etc
-- [ ] k8r secret sould support --job-name
-- [ ] The default job name should still work - right now since the k8r wrapper first cds and then runs the command it looses the original directory. You can fix this in the python script or the k8r shell function, whatever is more clear
-- [ ] Make sure the README reflects the same options as the -h and vice versa
-- [ ] Allow kubernetes namespace to be specified for all commands, otherwise use default namespace
-- [ ] Add a --show-yaml option for the run and secret commands that will print the kubernetes yaml to stdout instead of actually applying and running it
-- [ ] Add a --as-deployment option to run which will allow it to create it as a Deployment instead of a job (you may also need to adjust the other commands for this like ls logs rm etc)
+#### YAML Secret Warnings (stdout contamination)
+**Problem:** Warning messages printed to stdout broke `kubectl apply`  
+**Fix:** Changed secret warning prints to use `file=sys.stderr`
 
-## Development Notes
+#### Resource Quantity Format  
+**Problem:** "12gb" format rejected by Kubernetes validation  
+**Fix:** Auto-normalize to "12Gi" in `parse_resource_spec()`
 
-*Update this section as you work on the task. Include:*
-- *Progress updates*
-- *Key decisions made*
-- *Challenges encountered*
-- *Solutions implemented*
-- *Files modified*
-- *Testing notes*
+#### Name Length Limits (63 chars)
+**Problem:** Long deployment names exceeded Kubernetes limit  
+**Fix:** Enhanced `sanitize_k8s_name()` with truncation, limited base names to 55 chars
+- Jobs/Deployments: max 55 chars (allows suffixes like "-source")
+- Secrets: dynamic calculation based on job name length
+- Volumes: max 56 chars for secret names (allows "secret-" prefix)
 
-### Work Log
+## Testing Status
+- ✅ All resource formats (single, range, different units)
+- ✅ Secret mounting in all modes (execution, YAML, cross-job references)
+- ✅ Clean YAML output with warnings on stderr
+- ✅ Kubernetes validation passes for all generated resources
+- ✅ Name truncation works for all resource types
 
-- [2025-07-11 19:16:49] Task setup completed, TASK_MEMORY.md created
-- [2025-07-12] Refactored main() function to use argparse subparsers for better command organization
-- [2025-07-12] Implemented "run" as default command when no subcommand is specified
-- [2025-07-12] Added --namespace option to all commands with global support
-- [2025-07-12] Added --show-yaml option for run and secret commands
-- [2025-07-12] Added --as-deployment option for run command to create Deployments instead of Jobs
-- [2025-07-12] Fixed job name generation to preserve original directory context via K8R_ORIGINAL_PWD env var
-- [2025-07-12] Added --job-name support to secret command
-- [2025-07-12] Updated shell function in print_env_setup() to preserve original working directory
-- [2025-07-12] Updated README.md with new command structure, examples, and feature documentation
-- [2025-07-12] All tasks completed successfully - refactoring provides much clearer help output and better UX
-- [2025-07-12] Added 'update' command for self-updating k8r installations with branch switching support
-
-### Key Implementation Details
-
-1. **Subcommand Structure**: Used argparse subparsers to organize commands (run, ls, logs, rm, secret, update, env)
-2. **Backward Compatibility**: Maintained compatibility by automatically inserting "run" when first arg is not a known subcommand
-3. **Directory Context Fix**: Modified shell function to pass K8R_ORIGINAL_PWD environment variable
-4. **New Methods Added**:
-   - `create_secret_with_options()` - supports --job-name and --show-yaml
-   - `run_job_with_options()` - main entry point for run command
-   - `create_job_with_yaml_option()` - job creation with YAML output support
-   - `create_deployment()` - deployment creation instead of jobs
-   - `update_k8r()` - self-updating functionality with git operations
-5. **Global Options**: --namespace can be specified at the top level and applies to all commands
+## Files Modified
+1. **k8r.py** - Core implementation (resource parsing, secret logic, name sanitization)
+2. **README.md** - Documentation updates
 
 ---
 

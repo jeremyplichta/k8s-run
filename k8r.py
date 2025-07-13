@@ -60,6 +60,7 @@ class K8sRun:
         
         self.batch_v1 = client.BatchV1Api()
         self.core_v1 = client.CoreV1Api()
+        self.apps_v1 = client.AppsV1Api()
         
         # Get namespace from current context or environment variable
         try:
@@ -72,6 +73,33 @@ class K8sRun:
             default_namespace = 'default'
             
         self.namespace = os.environ.get('K8R_NAMESPACE', default_namespace)
+
+    def parse_resource_spec(self, resource_spec: Optional[str]) -> Optional[Tuple[str, str]]:
+        """Parse resource specification like '8gb', '2gb-8gb', '1000m', '500m-2000m', '1', '0.5-2'
+        Returns tuple of (requests, limits) or None if no spec provided"""
+        if not resource_spec:
+            return None
+        
+        def normalize_quantity(value: str) -> str:
+            """Normalize resource quantity to Kubernetes-compatible format"""
+            value = value.strip()
+            # Convert 'gb' to 'Gi' (gibibytes) for proper Kubernetes format
+            if value.endswith('gb'):
+                return value[:-2] + 'Gi'
+            # Convert 'mb' to 'Mi' (mebibytes) for proper Kubernetes format  
+            elif value.endswith('mb'):
+                return value[:-2] + 'Mi'
+            # Keep other formats as-is (m, G, M, etc.)
+            return value
+        
+        if '-' in resource_spec:
+            parts = resource_spec.split('-', 1)
+            if len(parts) == 2:
+                return (normalize_quantity(parts[0]), normalize_quantity(parts[1]))
+        
+        # Single value means both requests and limits are the same
+        normalized = normalize_quantity(resource_spec)
+        return (normalized, normalized)
 
     def detect_source_type(self, source: str) -> str:
         """Detect the type of source: directory, github, dockerfile, or container"""
@@ -87,7 +115,7 @@ class K8sRun:
             raise ValueError(f"Could not determine source type for: {source}")
 
     def generate_job_name(self, source: str, job_name: Optional[str] = None, allow_existing: bool = False) -> str:
-        """Generate a job name"""
+        """Generate a job name with proper length limits for Kubernetes"""
         if job_name:
             base_name = job_name
         elif source == "." or source == "./":
@@ -104,7 +132,9 @@ class K8sRun:
         else:
             base_name = re.sub(r'[^a-z0-9-]', '-', source.lower())
 
-        final_name = re.sub(r'[^a-z0-9-]', '-', base_name.lower()).strip('-')
+        # Sanitize and truncate the name, leaving room for common suffixes like "-source" (7 chars)
+        # This ensures compound names like "{job_name}-source" don't exceed 63 chars
+        final_name = self.sanitize_k8s_name(base_name, max_length=55)
         
         # Check if job exists and error if not allowed
         if self.job_exists(final_name) and not allow_existing:
@@ -172,7 +202,7 @@ class K8sRun:
 
     def create_job(self, source: str, command: List[str], num_instances: int = 1, 
                    timeout: str = "1h", base_image: str = "alpine:latest", 
-                   job_name: Optional[str] = None, retry_limit: Optional[int] = None) -> str:
+                   job_name: Optional[str] = None, retry_limit: Optional[int] = None, secret_job_name: Optional[str] = None) -> str:
         """Create a Kubernetes job"""
         
         source_type = self.detect_source_type(source)
@@ -204,7 +234,9 @@ class K8sRun:
             raise ValueError(f"Unsupported source type: {source_type}")
         
         # Discover and mount secrets for this job
-        job_secrets = self.get_job_secrets(final_job_name)
+        # Use secret_job_name if provided, otherwise use the actual job name
+        secrets_lookup_name = secret_job_name if secret_job_name else final_job_name
+        job_secrets = self.get_job_secrets(secrets_lookup_name)
         secret_volumes = []
         secret_volume_mounts = []
         secret_env_vars = []
@@ -213,8 +245,9 @@ class K8sRun:
             secret_name = secret_info["secret_name"]
             secret_k8s_name = secret_info["name"]
             
-            # Add volume for secret files
-            sanitized_volume_name = f"secret-{self.sanitize_k8s_name(secret_name)}"
+            # Add volume for secret files (ensure name doesn't exceed 63 chars)
+            sanitized_secret_name = self.sanitize_k8s_name(secret_name, max_length=56)  # 63 - 7 for "secret-"
+            sanitized_volume_name = f"secret-{sanitized_secret_name}"
             secret_volumes.append(
                 client.V1Volume(
                     name=sanitized_volume_name,
@@ -263,7 +296,10 @@ class K8sRun:
             container.env = secret_env_vars
         
         if job_secrets:
-            print(f"Mounting {len(job_secrets)} secrets for job '{final_job_name}'")
+            if secret_job_name:
+                print(f"Mounting {len(job_secrets)} secrets from job '{secret_job_name}' for job '{final_job_name}'")
+            else:
+                print(f"Mounting {len(job_secrets)} secrets for job '{final_job_name}'")
         
         # Determine restart policy and backoff limit
         restart_policy = "OnFailure" if retry_limit is not None else "Never"
@@ -564,52 +600,86 @@ fi
             time.sleep(1)
 
     def list_jobs(self) -> None:
-        """List current k8r jobs"""
+        """List current k8r jobs and deployments"""
         try:
-            # Filter for jobs created by k8r
+            # Get both jobs and deployments created by k8r
             jobs = self.batch_v1.list_namespaced_job(
                 namespace=self.namespace,
                 label_selector="created-by=k8r"
             )
             
-            if not jobs.items:
-                print("No k8r jobs found in namespace: " + self.namespace)
+            deployments = self.apps_v1.list_namespaced_deployment(
+                namespace=self.namespace,
+                label_selector="created-by=k8r,k8r-type=deployment"
+            )
+            
+            all_items = []
+            
+            # Process jobs
+            for job in jobs.items:
+                all_items.append({
+                    'name': job.metadata.name,
+                    'kind': 'Job',
+                    'source_type': job.metadata.labels.get("k8r-source-type", "unknown"),
+                    'desired': job.spec.completions or 0,
+                    'running': job.status.active or 0,
+                    'complete': job.status.succeeded or 0,
+                    'failed': job.status.failed or 0
+                })
+            
+            # Process deployments
+            for deployment in deployments.items:
+                all_items.append({
+                    'name': deployment.metadata.name,
+                    'kind': 'Deployment',
+                    'source_type': deployment.metadata.labels.get("k8r-source-type", "unknown"),
+                    'desired': deployment.spec.replicas or 0,
+                    'running': deployment.status.ready_replicas or 0,
+                    'complete': deployment.status.ready_replicas or 0,
+                    'failed': (deployment.status.replicas or 0) - (deployment.status.ready_replicas or 0)
+                })
+            
+            if not all_items:
+                print("No k8r jobs or deployments found in namespace: " + self.namespace)
                 return
             
             # Calculate column widths based on content
-            max_name_len = max(len(job.metadata.name) for job in jobs.items)
-            name_width = max(max_name_len, len("Job Name")) + 2
+            max_name_len = max(len(item['name']) for item in all_items)
+            name_width = max(max_name_len, len("Name")) + 2
             
             # Print header
-            header = f"{'Job Name':<{name_width}} | {'Type':<10} | {'Desired':<7} | {'Running':<7} | {'Complete':<8} | {'Failed':<6}"
+            header = f"{'Name':<{name_width}} | {'Kind':<10} | {'Type':<10} | {'Desired':<7} | {'Running':<7} | {'Ready':<5} | {'Failed':<6}"
             print(header)
             print("=" * len(header))
             
-            for job in jobs.items:
-                name = job.metadata.name
-                source_type = job.metadata.labels.get("k8r-source-type", "unknown")
-                desired = job.spec.completions or 0
-                status = job.status
-                running = status.active or 0
-                complete = status.succeeded or 0
-                failed = status.failed or 0
-                
-                print(f"{name:<{name_width}} | {source_type:<10} | {desired:<7} | {running:<7} | {complete:<8} | {failed:<6}")
+            # Sort by name for consistent output
+            all_items.sort(key=lambda x: x['name'])
+            
+            for item in all_items:
+                print(f"{item['name']:<{name_width}} | {item['kind']:<10} | {item['source_type']:<10} | {item['desired']:<7} | {item['running']:<7} | {item['complete']:<5} | {item['failed']:<6}")
                 
         except Exception as e:
-            print(f"Error listing jobs: {e}")
+            print(f"Error listing jobs and deployments: {e}")
 
     def get_job_logs(self, job_name: str, follow: bool = False) -> None:
-        """Get logs for a job"""
+        """Get logs for a job or deployment"""
         try:
-            # Get pods for the k8r job
+            # Try to find pods for either job or deployment
+            # First try job label
             pods = self.core_v1.list_namespaced_pod(
                 namespace=self.namespace,
                 label_selector=f"k8r-job={job_name},created-by=k8r"
             )
             
+            # If no pods found, try deployment label
             if not pods.items:
-                print(f"No pods found for job '{job_name}'")
+                pods = self.core_v1.list_namespaced_pod(
+                    namespace=self.namespace,
+                    label_selector=f"k8r-deployment={job_name},created-by=k8r"
+                )
+            
+            if not pods.items:
+                print(f"No pods found for job or deployment '{job_name}'")
                 return
             
             for pod in pods.items:
@@ -641,37 +711,66 @@ fi
             print(f"Error getting job logs: {e}")
 
     def delete_job(self, job_name: str, force: bool = False, rm_secrets: bool = False) -> None:
-        """Delete a k8r job"""
+        """Delete a k8r job or deployment"""
         try:
+            resource_type = None
+            resource_found = False
+            
             # Check if this is a k8r job
             try:
                 job = self.batch_v1.read_namespaced_job(name=job_name, namespace=self.namespace)
-                if not job.metadata.labels or job.metadata.labels.get("created-by") != "k8r":
-                    print(f"Job '{job_name}' was not created by k8r")
-                    return
+                if job.metadata.labels and job.metadata.labels.get("created-by") == "k8r":
+                    resource_type = "job"
+                    resource_found = True
             except Exception:
-                print(f"Job '{job_name}' not found")
+                pass
+            
+            # If not a job, check if it's a deployment
+            if not resource_found:
+                try:
+                    deployment = self.apps_v1.read_namespaced_deployment(name=job_name, namespace=self.namespace)
+                    if deployment.metadata.labels and deployment.metadata.labels.get("created-by") == "k8r":
+                        resource_type = "deployment"
+                        resource_found = True
+                except Exception:
+                    pass
+            
+            if not resource_found:
+                print(f"Job or deployment '{job_name}' not found or was not created by k8r")
                 return
             
-            # Check if job has running pods
-            pods = self.core_v1.list_namespaced_pod(
-                namespace=self.namespace,
-                label_selector=f"k8r-job={job_name},created-by=k8r"
-            )
+            # Check if resource has running pods
+            if resource_type == "job":
+                pods = self.core_v1.list_namespaced_pod(
+                    namespace=self.namespace,
+                    label_selector=f"k8r-job={job_name},created-by=k8r"
+                )
+            else:  # deployment
+                pods = self.core_v1.list_namespaced_pod(
+                    namespace=self.namespace,
+                    label_selector=f"k8r-deployment={job_name},created-by=k8r"
+                )
             
             running_pods = [pod for pod in pods.items if pod.status.phase == "Running"]
             
             if running_pods and not force:
-                print(f"Warning: Job '{job_name}' has {len(running_pods)} running pods.")
+                print(f"Warning: {resource_type.title()} '{job_name}' has {len(running_pods)} running pods.")
                 print("Use -f/--force to delete anyway.")
                 return
             
-            # Delete the job
-            self.batch_v1.delete_namespaced_job(
-                name=job_name,
-                namespace=self.namespace,
-                propagation_policy="Background"
-            )
+            # Delete the resource
+            if resource_type == "job":
+                self.batch_v1.delete_namespaced_job(
+                    name=job_name,
+                    namespace=self.namespace,
+                    propagation_policy="Background"
+                )
+            else:  # deployment
+                self.apps_v1.delete_namespaced_deployment(
+                    name=job_name,
+                    namespace=self.namespace,
+                    propagation_policy="Background"
+                )
             
             # Delete associated configmap if it exists
             try:
@@ -757,7 +856,7 @@ fi
             print(f"Warning: Error listing secrets for job {job_name}: {e}")
             return []
 
-    def sanitize_k8s_name(self, name: str) -> str:
+    def sanitize_k8s_name(self, name: str, max_length: int = 63) -> str:
         """Sanitize a name to be compliant with Kubernetes RFC 1123 subdomain rules"""
         # Convert to lowercase
         name = name.lower()
@@ -772,9 +871,15 @@ fi
         # Collapse multiple consecutive hyphens/dots
         name = re.sub(r'[-\.]+', '-', name)
         
-        # Ensure it's not empty and doesn't exceed length limits
+        # Ensure it's not empty
         if not name:
             name = 'unnamed'
+        
+        # Truncate to max_length (default 63 chars for Kubernetes)
+        if len(name) > max_length:
+            name = name[:max_length]
+            # Ensure truncated name doesn't end with hyphen or dot
+            name = re.sub(r'[^a-z0-9]+$', '', name)
         
         return name
 
@@ -782,6 +887,14 @@ fi
         """Create a Kubernetes secret with k8r labels"""
         job_name = self.get_job_name_from_directory()
         sanitized_secret_name = self.sanitize_k8s_name(secret_name)
+        # Ensure full secret name doesn't exceed 63 characters
+        max_secret_name_length = 63 - len(job_name) - 1  # -1 for the hyphen
+        if max_secret_name_length <= 0:
+            # Job name is too long, truncate it to allow for secret name
+            job_name = self.sanitize_k8s_name(job_name, max_length=50)
+            max_secret_name_length = 63 - len(job_name) - 1
+        if len(sanitized_secret_name) > max_secret_name_length:
+            sanitized_secret_name = self.sanitize_k8s_name(sanitized_secret_name, max_length=max_secret_name_length)
         full_secret_name = f"{job_name}-{sanitized_secret_name}"
         
         # Prepare secret data
@@ -865,6 +978,14 @@ fi
         # Use provided job name or fall back to directory-based name
         effective_job_name = job_name if job_name else original_job_name
         sanitized_secret_name = self.sanitize_k8s_name(secret_name)
+        # Ensure full secret name doesn't exceed 63 characters
+        max_secret_name_length = 63 - len(effective_job_name) - 1  # -1 for the hyphen
+        if max_secret_name_length <= 0:
+            # Job name is too long, truncate it to allow for secret name
+            effective_job_name = self.sanitize_k8s_name(effective_job_name, max_length=50)
+            max_secret_name_length = 63 - len(effective_job_name) - 1
+        if len(sanitized_secret_name) > max_secret_name_length:
+            sanitized_secret_name = self.sanitize_k8s_name(sanitized_secret_name, max_length=max_secret_name_length)
         full_secret_name = f"{effective_job_name}-{sanitized_secret_name}"
         
         # Prepare secret data (same logic as original create_secret)
@@ -944,7 +1065,7 @@ fi
     def run_job_with_options(self, source: str, command: List[str], num_instances: int = 1, 
                            timeout: str = "1h", base_image: str = "alpine:latest", 
                            job_name: Optional[str] = None, detach: bool = False,
-                           show_yaml: bool = False, as_deployment: bool = False, retry_limit: Optional[int] = None, follow: bool = False, rm_existing: bool = False) -> None:
+                           show_yaml: bool = False, as_deployment: bool = False, retry_limit: Optional[int] = None, follow: bool = False, rm_existing: bool = False, memory: Optional[str] = None, cpu: Optional[str] = None, secret_job_name: Optional[str] = None) -> None:
         """Create and run a job with additional options"""
         
         # Handle --rm flag: delete existing job if it exists
@@ -960,7 +1081,7 @@ fi
             job_name = self.create_deployment(
                 source=source, command=command, num_instances=num_instances,
                 timeout=timeout, base_image=base_image, job_name=job_name,
-                show_yaml=show_yaml
+                show_yaml=show_yaml, memory=memory, cpu=cpu, secret_job_name=secret_job_name
             )
             if not show_yaml:
                 print(f"Deployment '{job_name}' created")
@@ -968,7 +1089,8 @@ fi
             job_name = self.create_job_with_yaml_option(
                 source=source, command=command, num_instances=num_instances,
                 timeout=timeout, base_image=base_image, job_name=job_name,
-                show_yaml=show_yaml, retry_limit=retry_limit, allow_existing=rm_existing
+                show_yaml=show_yaml, retry_limit=retry_limit, allow_existing=rm_existing,
+                memory=memory, cpu=cpu, secret_job_name=secret_job_name
             )
             if not show_yaml:
                 if follow and not detach:
@@ -978,7 +1100,7 @@ fi
     
     def create_job_with_yaml_option(self, source: str, command: List[str], num_instances: int = 1, 
                                   timeout: str = "1h", base_image: str = "alpine:latest", 
-                                  job_name: Optional[str] = None, show_yaml: bool = False, retry_limit: Optional[int] = None, allow_existing: bool = False) -> str:
+                                  job_name: Optional[str] = None, show_yaml: bool = False, retry_limit: Optional[int] = None, allow_existing: bool = False, memory: Optional[str] = None, cpu: Optional[str] = None, secret_job_name: Optional[str] = None) -> str:
         """Create a job with option to output YAML instead of applying"""
         
         source_type = self.detect_source_type(source)
@@ -1014,27 +1136,35 @@ fi
         else:
             raise ValueError(f"Unsupported source type: {source_type}")
         
-        # Handle secrets (skip for show_yaml mode to avoid side effects)
+        # Handle secrets (always include for show_yaml mode)
         secret_volumes = []
         secret_volume_mounts = []
         secret_env_vars = []
         
-        # Get job secrets (even in show_yaml mode to demonstrate mounting)
-        job_secrets = self.get_job_secrets(final_job_name) if not show_yaml else []
-        
-        # For show_yaml mode, try to get secrets anyway for demonstration
-        if show_yaml and not job_secrets:
-            try:
-                job_secrets = self.get_job_secrets(final_job_name)
-            except:
-                pass  # Ignore errors in show_yaml mode
+        # Get job secrets (include in show_yaml mode to demonstrate mounting)
+        # Use secret_job_name if provided, otherwise use the actual job name
+        secrets_lookup_name = secret_job_name if secret_job_name else final_job_name
+        job_secrets = self.get_job_secrets(secrets_lookup_name)
         
         if job_secrets:
+            if show_yaml:
+                if secret_job_name:
+                    print(f"⚠️  YAML includes {len(job_secrets)} secrets from job '{secret_job_name}' - these secrets must exist when applying this YAML", file=sys.stderr)
+                else:
+                    print(f"⚠️  YAML includes {len(job_secrets)} secrets for job '{final_job_name}' - these secrets must exist when applying this YAML", file=sys.stderr)
+            else:
+                # Only show mounting message for actual execution, not YAML generation
+                if secret_job_name:
+                    print(f"Mounting {len(job_secrets)} secrets from job '{secret_job_name}' for job '{final_job_name}'")
+                else:
+                    print(f"Mounting {len(job_secrets)} secrets for job '{final_job_name}'")
+            
+            # Process secret mounting for all modes
             for secret_info in job_secrets:
                 secret_name = secret_info["secret_name"]
                 secret_k8s_name = secret_info["name"]
                 
-                sanitized_volume_name = f"secret-{self.sanitize_k8s_name(secret_name)}"
+                sanitized_volume_name = f"secret-{self.sanitize_k8s_name(secret_name, max_length=56)}"
                 secret_volumes.append(
                     client.V1Volume(
                         name=sanitized_volume_name,
@@ -1078,9 +1208,27 @@ fi
                 container.env.extend(secret_env_vars)
             else:
                 container.env = secret_env_vars
+        
+        # Add resource specifications to container
+        memory_spec = self.parse_resource_spec(memory)
+        cpu_spec = self.parse_resource_spec(cpu)
+        
+        if memory_spec or cpu_spec:
+            requests = {}
+            limits = {}
             
-            if job_secrets:
-                print(f"Mounting {len(job_secrets)} secrets for job '{final_job_name}'")
+            if memory_spec:
+                requests['memory'] = memory_spec[0]
+                limits['memory'] = memory_spec[1]
+            
+            if cpu_spec:
+                requests['cpu'] = cpu_spec[0]
+                limits['cpu'] = cpu_spec[1]
+            
+            container.resources = client.V1ResourceRequirements(
+                requests=requests if requests else None,
+                limits=limits if limits else None
+            )
         
         # Determine restart policy and backoff limit
         restart_policy = "OnFailure" if retry_limit is not None else "Never"
@@ -1138,7 +1286,7 @@ fi
     
     def create_deployment(self, source: str, command: List[str], num_instances: int = 1, 
                          timeout: str = "1h", base_image: str = "alpine:latest", 
-                         job_name: Optional[str] = None, show_yaml: bool = False) -> str:
+                         job_name: Optional[str] = None, show_yaml: bool = False, memory: Optional[str] = None, cpu: Optional[str] = None, secret_job_name: Optional[str] = None) -> str:
         """Create a Deployment instead of a Job"""
         
         source_type = self.detect_source_type(source)
@@ -1171,18 +1319,28 @@ fi
         else:
             raise ValueError(f"Unsupported source type: {source_type}")
         
-        # Handle secrets (skip for show_yaml mode)
+        # Handle secrets (always include for show_yaml mode)
         secret_volumes = []
         secret_volume_mounts = []
         secret_env_vars = []
         
-        if not show_yaml:
-            job_secrets = self.get_job_secrets(final_deployment_name)
+        # Use secret_job_name if provided, otherwise use the actual deployment name
+        secrets_lookup_name = secret_job_name if secret_job_name else final_deployment_name
+        job_secrets = self.get_job_secrets(secrets_lookup_name)
+        
+        if job_secrets:
+            if show_yaml:
+                if secret_job_name:
+                    print(f"⚠️  YAML includes {len(job_secrets)} secrets from job '{secret_job_name}' - these secrets must exist when applying this YAML", file=sys.stderr)
+                else:
+                    print(f"⚠️  YAML includes {len(job_secrets)} secrets for job '{final_deployment_name}' - these secrets must exist when applying this YAML", file=sys.stderr)
+            
+        if job_secrets:
             for secret_info in job_secrets:
                 secret_name = secret_info["secret_name"]
                 secret_k8s_name = secret_info["name"]
                 
-                sanitized_volume_name = f"secret-{self.sanitize_k8s_name(secret_name)}"
+                sanitized_volume_name = f"secret-{self.sanitize_k8s_name(secret_name, max_length=56)}"
                 secret_volumes.append(
                     client.V1Volume(
                         name=sanitized_volume_name,
@@ -1227,6 +1385,27 @@ fi
             else:
                 container.env = secret_env_vars
         
+        # Add resource specifications to container
+        memory_spec = self.parse_resource_spec(memory)
+        cpu_spec = self.parse_resource_spec(cpu)
+        
+        if memory_spec or cpu_spec:
+            requests = {}
+            limits = {}
+            
+            if memory_spec:
+                requests['memory'] = memory_spec[0]
+                limits['memory'] = memory_spec[1]
+            
+            if cpu_spec:
+                requests['cpu'] = cpu_spec[0]
+                limits['cpu'] = cpu_spec[1]
+            
+            container.resources = client.V1ResourceRequirements(
+                requests=requests if requests else None,
+                limits=limits if limits else None
+            )
+        
         # Create deployment
         deployment = client.V1Deployment(
             metadata=client.V1ObjectMeta(
@@ -1269,8 +1448,7 @@ fi
             return final_deployment_name
         
         # Apply the deployment
-        apps_v1 = client.AppsV1Api()
-        apps_v1.create_namespaced_deployment(namespace=self.namespace, body=deployment)
+        self.apps_v1.create_namespaced_deployment(namespace=self.namespace, body=deployment)
         return final_deployment_name
 
 
@@ -1468,6 +1646,9 @@ Examples:
     run_parser.add_argument("--retry", type=int, metavar="N", help="Set restart policy to OnFailure with backoff limit N (default: Never)")
     run_parser.add_argument("-f", "--follow", action="store_true", help="Follow logs after job starts")
     run_parser.add_argument("--rm", action="store_true", help="Delete existing job with same name before creating new one")
+    run_parser.add_argument("--mem", help="Memory request/limit (e.g., 8gb, 2gb-8gb)")
+    run_parser.add_argument("--cpu", help="CPU request/limit (e.g., 1000m, 500m-2000m, 1, 0.5-2)")
+    run_parser.add_argument("--secret-job", help="Use secrets from a different job name (for sharing secrets between jobs)")
     
     # List command
     ls_parser = subparsers.add_parser("ls", help="List k8r jobs")
@@ -1557,7 +1738,10 @@ Examples:
             as_deployment=args.as_deployment,
             retry_limit=args.retry,
             follow=args.follow,
-            rm_existing=args.rm
+            rm_existing=args.rm,
+            memory=args.mem,
+            cpu=args.cpu,
+            secret_job_name=args.secret_job
         )
     else:
         parser.print_help()
