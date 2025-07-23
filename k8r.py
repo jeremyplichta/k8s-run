@@ -29,7 +29,7 @@ except ImportError:
 
 
 class K8sRun:
-    def __init__(self):
+    def __init__(self, insecure=False):
         if not DEPENDENCIES_AVAILABLE:
             print("Error: Dependencies not installed. Please run 'uv sync' first.")
             sys.exit(1)
@@ -38,17 +38,19 @@ class K8sRun:
             # Load kubeconfig 
             config.load_kube_config()
             
-            # Configure SSL settings to be more permissive like kubectl
-            configuration = client.Configuration.get_default_copy()
-            
-            # Disable SSL warnings for self-signed certificates
-            import urllib3
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            
-            # Set some SSL configuration that might help
-            if hasattr(configuration, 'verify_ssl'):
-                # Try to match kubectl's SSL behavior
-                pass  # Let it use the kubeconfig settings
+            # Configure SSL settings if insecure mode is enabled
+            if insecure:
+                configuration = client.Configuration.get_default_copy()
+                
+                # Disable SSL warnings for self-signed certificates
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                
+                # Disable SSL verification
+                configuration.verify_ssl = False
+                
+                # Set the configuration as the default
+                client.Configuration.set_default(configuration)
             
         except Exception as e:
             try:
@@ -195,7 +197,8 @@ class K8sRun:
             print(f"Error creating ConfigMap: {e}")
             print("This might be due to SSL/TLS configuration issues.")
             print("kubectl works but the Python kubernetes client has different SSL handling.")
-            print("Try running: kubectl create configmap test --dry-run=client -o yaml")
+            print("Try running with --insecure flag to disable SSL certificate verification.")
+            print("Or test with: kubectl create configmap test --dry-run=client -o yaml")
             raise
         
         return configmap_name
@@ -1629,6 +1632,7 @@ Examples:
     
     # Add global options
     parser.add_argument("--namespace", help="Kubernetes namespace (overrides kubeconfig context)")
+    parser.add_argument("--insecure", action="store_true", help="Disable SSL certificate verification (use with self-signed certificates)")
     
     # Create subparsers
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -1709,8 +1713,9 @@ Examples:
         update_k8r(args.branch)
         return
     
-    # Initialize K8sRun with namespace override
-    k8r = K8sRun()
+    # Initialize K8sRun with namespace override and insecure flag
+    insecure_mode = getattr(args, 'insecure', False)
+    k8r = K8sRun(insecure=insecure_mode)
     if namespace_override:
         k8r.namespace = namespace_override
     
